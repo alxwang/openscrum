@@ -1,0 +1,197 @@
+{
+  "WRITE_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/write.txt",
+    "description": "Tool description for the Write tool that writes files to the local filesystem",
+    "variables": []
+  },
+  "WEBSEARCH_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/websearch.txt",
+    "description": "Tool description for the WebSearch tool that performs real-time web searches using Exa AI",
+    "variables": ["date"]
+  },
+  "WEBFETCH_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/webfetch.txt",
+    "description": "Tool description for the WebFetch tool that fetches content from URLs",
+    "variables": []
+  },
+  "TODOWRITE_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/todowrite.txt",
+    "description": "Tool description for the TodoWrite tool that manages structured task lists",
+    "variables": []
+  },
+  "TODOREAD_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/todoread.txt",
+    "description": "Tool description for the TodoRead tool that reads the current todo list",
+    "variables": []
+  },
+  "TASK_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/task.txt",
+    "description": "Tool description for the Task tool that launches subagents for complex multistep tasks",
+    "variables": ["agents"]
+  },
+  "QUESTION_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/question.txt",
+    "description": "Tool description for the Question tool that asks users questions during execution",
+    "variables": []
+  },
+  "PLAN_EXIT_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/plan-exit.txt",
+    "description": "Tool description for the PlanExit tool that exits plan mode and switches to build agent",
+    "variables": []
+  },
+  "PLAN_ENTER_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/plan-enter.txt",
+    "description": "Tool description for the PlanEnter tool that enters plan mode for research and planning",
+    "variables": []
+  },
+  "MULTIEDIT_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/multiedit.txt",
+    "description": "Tool description for the MultiEdit tool that performs multiple edits to a single file",
+    "variables": []
+  },
+  "LSP_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/lsp.txt",
+    "description": "Tool description for the LSP tool that interacts with Language Server Protocol servers",
+    "variables": []
+  },
+  "LIST_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/ls.txt",
+    "description": "Tool description for the List tool that lists files and directories",
+    "variables": []
+  },
+  "GREP_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/grep.txt",
+    "description": "Tool description for the Grep tool that searches file contents using regex patterns",
+    "variables": []
+  },
+  "GLOB_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/glob.txt",
+    "description": "Tool description for the Glob tool that finds files by name patterns",
+    "variables": []
+  },
+  "EDIT_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/edit.txt",
+    "description": "Tool description for the Edit tool that performs exact string replacements in files",
+    "variables": []
+  },
+  "CODESEARCH_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/codesearch.txt",
+    "description": "Tool description for the CodeSearch tool that searches for programming context using Exa Code API",
+    "variables": []
+  },
+  "BATCH_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/batch.txt",
+    "description": "Tool description for the Batch tool that executes multiple tool calls concurrently",
+    "variables": []
+  },
+  "BASH_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/bash.txt",
+    "description": "Tool description for the Bash tool that executes bash commands in a persistent shell session",
+    "variables": ["directory", "maxLines", "maxBytes"]
+  },
+  "APPLY_PATCH_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/apply_patch.txt",
+    "description": "Tool description for the ApplyPatch tool that applies patch format edits to files",
+    "variables": []
+  },
+  "READ_TOOL_DESCRIPTION": {
+    "path": "prompts/tool/read.txt",
+    "description": "Tool description for the Read tool that reads files from the local filesystem",
+    "variables": []
+  },
+  "AGENT_GENERATION_SYSTEM": {
+    "path": "prompts/agent/generate.txt",
+    "description": "System prompt for generating new agent configurations from user descriptions",
+    "variables": []
+  },
+  "COMPACTION_AGENT_SYSTEM": {
+    "path": "prompts/agent/prompt/compaction.txt",
+    "description": "System prompt for the hidden compaction agent that summarizes prior conversation context",
+    "variables": []
+  },
+  "EXPLORE_AGENT_SYSTEM": {
+    "path": "prompts/agent/prompt/explore.txt",
+    "description": "System prompt for the file search and codebase exploration subagent",
+    "variables": []
+  },
+  "SUMMARY_AGENT_SYSTEM": {
+    "path": "prompts/agent/prompt/summary.txt",
+    "description": "System prompt for the agent that writes detailed but concise conversation summaries",
+    "variables": []
+  },
+  "TITLE_AGENT_SYSTEM": {
+    "path": "prompts/agent/prompt/title.txt",
+    "description": "System prompt for the agent that generates brief, searchable conversation titles",
+    "variables": []
+  },
+  "ANTHROPIC_PROVIDER_SYSTEM": {
+    "path": "prompts/session/prompt/anthropic.txt",
+    "description": "Provider-specific system prompt for Anthropic Claude models",
+    "variables": []
+  },
+  "ANTHROPIC_20250930_PROVIDER_SYSTEM": {
+    "path": "prompts/session/prompt/anthropic-20250930.txt",
+    "description": "Provider-specific system prompt for Anthropic Claude models (version 20250930)",
+    "variables": []
+  },
+  "QWEN_PROVIDER_SYSTEM": {
+    "path": "prompts/session/prompt/qwen.txt",
+    "description": "Provider-specific system prompt for Qwen models (Anthropic-style without TODO)",
+    "variables": []
+  },
+  "BEAST_PROVIDER_SYSTEM": {
+    "path": "prompts/session/prompt/beast.txt",
+    "description": "Provider-specific system prompt for GPT models (GPT-4, GPT-5, o1, o3)",
+    "variables": []
+  },
+  "GEMINI_PROVIDER_SYSTEM": {
+    "path": "prompts/session/prompt/gemini.txt",
+    "description": "Provider-specific system prompt for Google Gemini models",
+    "variables": []
+  },
+  "CODEX_HEADER_SYSTEM": {
+    "path": "prompts/session/prompt/codex_header.txt",
+    "description": "Codex header prompt used for instructions() function and GPT-5 models",
+    "variables": []
+  },
+  "TRINITY_PROVIDER_SYSTEM": {
+    "path": "prompts/session/prompt/trinity.txt",
+    "description": "Provider-specific system prompt for Trinity models",
+    "variables": []
+  },
+  "COPILOT_GPT5_PROVIDER_SYSTEM": {
+    "path": "prompts/session/prompt/copilot-gpt-5.txt",
+    "description": "Provider-specific system prompt for Copilot GPT-5 models",
+    "variables": []
+  },
+  "PLAN_MODE_SYSTEM_REMINDER": {
+    "path": "prompts/session/prompt/plan.txt",
+    "description": "System reminder prompt for plan mode (read-only phase)",
+    "variables": []
+  },
+  "PLAN_REMINDER_ANTHROPIC_SYSTEM": {
+    "path": "prompts/session/prompt/plan-reminder-anthropic.txt",
+    "description": "System reminder prompt for plan mode (Anthropic-specific)",
+    "variables": []
+  },
+  "BUILD_SWITCH_SYSTEM_REMINDER": {
+    "path": "prompts/session/prompt/build-switch.txt",
+    "description": "System reminder prompt for switching from plan to build mode",
+    "variables": []
+  },
+  "MAX_STEPS_SYSTEM_REMINDER": {
+    "path": "prompts/session/prompt/max-steps.txt",
+    "description": "System reminder prompt when maximum steps are reached",
+    "variables": []
+  },
+  "INITIALIZE_COMMAND_TEMPLATE": {
+    "path": "prompts/command/template/initialize.txt",
+    "description": "Command template for the 'init' command that creates/updates AGENTS.md",
+    "variables": ["path", "ARGUMENTS"]
+  },
+  "REVIEW_COMMAND_TEMPLATE": {
+    "path": "prompts/command/template/review.txt",
+    "description": "Command template for the 'review' command that reviews code changes",
+    "variables": ["ARGUMENTS"]
+  }
+}
