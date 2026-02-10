@@ -47,14 +47,21 @@ BASE_URL="${OPENSCRUM_URL:-http://localhost:$PORT}"
 
 # Parse options (don't pass these to the client)
 RESTART=0
+KILL_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --restart|-r) RESTART=1; shift ;;
+    --kill-backend|--stop-backend|--stop)
+      # Stop the backend server and exit without starting TUI.
+      KILL_ONLY=1
+      shift
+      ;;
     --help|-h)
       echo "Usage: openscrum [OPTIONS] [URL]"
       echo "  Run from your project directory; that directory is the workspace root."
       echo "  Options:"
       echo "    --restart, -r   Restart the backend server (kill existing, then start)"
+      echo "    --kill-backend  Stop the backend server on OPENSCRUM_PORT (default 8000) and exit"
       echo "    --help, -h      Show this help"
       echo "  Requires: mamba activate openscrum (or conda env openscrum)"
       echo "  Add to PATH: ln -sf $SCRIPT_DIR/openscrum.sh ~/bin/openscrum"
@@ -84,6 +91,11 @@ kill_backend() {
 
 if [ "$RESTART" = 1 ]; then
   kill_backend
+fi
+
+if [ "$KILL_ONLY" = 1 ]; then
+  kill_backend
+  exit 0
 fi
 
 if ! backend_up; then

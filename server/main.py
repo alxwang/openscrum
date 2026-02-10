@@ -204,6 +204,19 @@ def get_agent(workspace_root: str = None) -> object:
         Compiled agent graph
     """
     workspace = workspace_root or WORKSPACE_ROOT
+
+    # Ensure system tools use the same workspace root so all file and shell
+    # operations are confined to the configured workspace directory.
+    try:
+        from server.tools import system_tools as _system_tools
+    except ImportError:
+        try:
+            import tools.system_tools as _system_tools
+        except ImportError:
+            _system_tools = None
+    if _system_tools is not None:
+        _system_tools.WORKSPACE_ROOT = workspace
+
     llm = create_llm()
     return create_agent(llm, workspace_root=workspace)
 

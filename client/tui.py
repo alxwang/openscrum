@@ -306,13 +306,15 @@ class ChatWidget(Container):
             return
         
         try:
+            # Workspace root is where the user started the TUI (set by
+            # OPENSCRUM_WORKSPACE_ROOT in the launcher, or fallback to cwd).
             workspace = os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
             self.workspace_root = workspace
             
-            # Create new session
+            # Create new session, explicitly telling the server our workspace root.
             response = await self.client.post(
                 f"{self.server_url}/sessions",
-                json={"directory": workspace},
+                params={"directory": workspace},
             )
             response.raise_for_status()
             session = response.json()
@@ -520,6 +522,34 @@ class ChatWidget(Container):
                             chat_log.write(
                                 f"[yellow]🔧 Calling tool: [bold]{tool_name}[/bold][/yellow]"
                             )
+                            # For bash, show the actual command (and optional workdir).
+                            if tool_name == "bash":
+                                try:
+                                    cmd = (tool_input or {}).get("command")
+                                    workdir = (tool_input or {}).get("workdir")
+                                    if cmd:
+                                        chat_log.write(f"[dim]  command: {cmd}[/dim]")
+                                    if workdir:
+                                        chat_log.write(f"[dim]  workdir: {workdir}[/dim]")
+                                except Exception:
+                                    pass
+                            # Show effective working directory for commands (especially bash)
+                            try:
+                                workspace = (self.workspace_root or "").strip() or os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
+                                effective_cwd = None
+                                if tool_name == "bash":
+                                    workdir = (tool_input or {}).get("workdir")
+                                    if workdir:
+                                        effective_cwd = str((Path(workspace) / workdir).resolve())
+                                    elif workspace:
+                                        effective_cwd = str(Path(workspace).resolve())
+                                elif workspace:
+                                    # For non-bash tools, workspace root is the implicit working directory
+                                    effective_cwd = str(Path(workspace).resolve())
+                                if effective_cwd:
+                                    chat_log.write(f"[dim]  cwd: {effective_cwd}[/dim]")
+                            except Exception:
+                                pass
                             if tool_input:
                                 # Format tool input nicely
                                 input_str = json.dumps(tool_input, indent=2)
@@ -536,11 +566,37 @@ class ChatWidget(Container):
                             req_id = perm.get("id")
                             perm_name = perm.get("permission", "?")
                             patterns = perm.get("patterns", [])
-                            tool_name = (perm.get("metadata") or {}).get("tool", "?")
+                            metadata = perm.get("metadata") or {}
+                            tool_name = metadata.get("tool", "?")
                             chat_log.write(
                                 f"[yellow]Permission: [bold]{perm_name}[/bold] ({tool_name}) "
                                 f"for {patterns}[/yellow]"
                             )
+                            # Also show effective working directory for the pending tool, when known.
+                            try:
+                                workspace = (self.workspace_root or "").strip() or os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
+                                args = metadata.get("args") or {}
+                                effective_cwd = None
+                                if tool_name == "bash":
+                                    workdir = args.get("workdir")
+                                    if workdir:
+                                        effective_cwd = str((Path(workspace) / workdir).resolve())
+                                    elif workspace:
+                                        effective_cwd = str(Path(workspace).resolve())
+                                elif workspace:
+                                    effective_cwd = str(Path(workspace).resolve())
+                                if effective_cwd:
+                                    chat_log.write(f"[dim]  cwd: {effective_cwd}[/dim]")
+                            except Exception:
+                                pass
+                            # For bash, also show the actual command being requested.
+                            if tool_name == "bash":
+                                try:
+                                    cmd = (metadata.get("args") or {}).get("command")
+                                    if cmd:
+                                        chat_log.write(f"[dim]  command: {cmd}[/dim]")
+                                except Exception:
+                                    pass
                             reply = await self._ask_permission_reply(
                                 req_id, perm_name, patterns, tool_name
                             )

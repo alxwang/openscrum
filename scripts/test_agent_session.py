@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import signal
 from pathlib import Path
 
 try:
@@ -49,9 +50,32 @@ def _server_up(server: str, timeout: float = 2.0) -> bool:
 
 
 def ensure_server(server: str, port: int = 8000) -> None:
-    """If server is not up, start it from repo root; wait until healthy."""
-    if _server_up(server):
-        return
+    """
+    Always start a fresh server from repo root; wait until healthy.
+
+    For test runs we want a clean backend instance every time, so we:
+    1. Kill any existing process listening on the target port.
+    2. Start a new uvicorn server and wait for /health to succeed.
+    """
+    # Best-effort kill of any existing process on this port (mirrors openscrum.sh kill_backend).
+    try:
+        out = subprocess.check_output(["lsof", "-ti", f":{port}"], text=True)
+    except Exception:
+        out = ""
+    pids = [p.strip() for p in out.splitlines() if p.strip()]
+    for pid_str in pids:
+        try:
+            os.kill(int(pid_str), signal.SIGTERM)
+        except Exception:
+            pass
+    if pids:
+        time.sleep(1)
+        for pid_str in pids:
+            try:
+                os.kill(int(pid_str), signal.SIGKILL)
+            except Exception:
+                pass
+
     root = _repo_root()
     if not (root / "server" / "main.py").exists():
         print(f"Repo root not found at {root} (no server/main.py)", file=sys.stderr)
@@ -131,8 +155,14 @@ def main():
 
     workspace = args.workspace
     if not workspace:
-        workspace = tempfile.mkdtemp(prefix="openscrum_test_")
-        cleanup_workspace = True
+        # Default workspace: "../workspace" relative to the OpenScrum repo root.
+        # This keeps all generated files in a dedicated Workspace directory
+        # outside the OpenScrum repo, matching the server's default.
+        root = _repo_root()
+        workspace = os.path.abspath(os.path.join(root.parent, "workspace"))
+        Path(workspace).mkdir(parents=True, exist_ok=True)
+        print(f"Using default workspace: {workspace}")
+        cleanup_workspace = False
     else:
         workspace = os.path.abspath(workspace)
         Path(workspace).mkdir(parents=True, exist_ok=True)
@@ -162,6 +192,7 @@ def main():
             payload = {"message": msg, "mode": mode}
             with client.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()
+                # Stream AI tokens and tool activity for visibility.
                 for line in resp.iter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -184,15 +215,38 @@ def main():
                         else:
                             ask_permission(perm, server, client)
                     elif typ == "token":
-                        pass  # skip token noise
+                        # Show AI response tokens as they stream.
+                        content = data.get("content", "")
+                        if content:
+                            print(content, end="", flush=True)
                     elif typ == "tool_call":
-                        print(f"  tool: {data.get('tool_name', '?')}")
+                        tool_name = data.get("tool_name", "?")
+                        tool_input = data.get("tool_input") or {}
+                        print(f"\n  tool: {tool_name}")
+                        if tool_name == "bash":
+                            cmd = tool_input.get("command")
+                            workdir = tool_input.get("workdir")
+                            if cmd:
+                                print(f"    command: {cmd}")
+                            if workdir:
+                                print(f"    workdir: {workdir}")
                     elif typ == "tool_result":
-                        print(f"  tool result: {data.get('tool_name', '?')}")
+                        tool_name = data.get("tool_name", "?")
+                        tool_output = data.get("tool_output", "") or ""
+                        print(f"\n  tool result: {tool_name}")
+                        if tool_output:
+                            preview = tool_output[:400]
+                            if len(tool_output) > 400:
+                                preview += f"\n... ({len(tool_output) - 400} more characters)"
+                            # Indent multi-line output for readability
+                            indented = "\n".join(f"    {line}" for line in preview.splitlines())
+                            print(indented)
                     elif typ == "done":
+                        # Ensure we end on a newline after streaming tokens.
+                        print()
                         return
                     elif typ == "error":
-                        print(f"  ERROR: {data.get('content', '')[:200]}", file=sys.stderr)
+                        print(f"\n  ERROR: {data.get('content', '')[:200]}", file=sys.stderr)
                         return
 
         # First message

@@ -407,7 +407,7 @@ def list_files(
 def bash(
     command: str = Field(..., description="The command to execute"),
     workdir: Optional[str] = Field(None, description="The working directory to run the command in (relative to workspace root)"),
-    timeout: Optional[int] = Field(None, description="Optional timeout in milliseconds (default: 120000)"),
+    timeout: Optional[int] = Field(None, description="Optional timeout in milliseconds (default: 600000 / 10 minutes)"),
     description: Optional[str] = Field(None, description="Clear, concise description of what this command does in 5-10 words"),
 ) -> str:
     """
@@ -417,8 +417,19 @@ def bash(
     DO NOT use it for file operations - use the specialized tools instead.
     
     All commands run in workspace root by default. Use workdir parameter to change directories.
+    
+    This tool is **non-interactive**:
+    - stdin is closed for the child process (no user input possible)
+    - Interactive commands like `npm init` or `vue create` will hang or fail
+    - Prefer non-interactive variants (e.g. `npm init -y`, `vue create app --default`)
+    
+    For long-running servers (e.g. `npm run serve`, `node server.js`), you should:
+    - Start them in the background using `&` (e.g. `npm run serve &`)
+    - Or use one-shot commands (e.g. `npm run build`) in automated tests
     """
-    DEFAULT_TIMEOUT = 120000  # 2 minutes
+    # Default timeout in milliseconds for foreground commands.
+    # Match OpenCode's default (2 minutes) and allow override via environment.
+    DEFAULT_TIMEOUT = int(os.getenv("OPENSCRUM_BASH_DEFAULT_TIMEOUT_MS", "120000"))
     
     try:
         # Resolve working directory
@@ -430,15 +441,36 @@ def bash(
         else:
             cmd_dir = Path(WORKSPACE_ROOT)
         
-        # Set timeout
+        # Detect background commands (trailing '&') and handle specially
+        cmd_str = command.strip()
+        is_background = cmd_str.endswith("&")
+        if is_background:
+            # Strip trailing '&' and any trailing whitespace
+            cmd_str = cmd_str[:-1].rstrip()
+            
+            # Start background process and return immediately without waiting.
+            proc = subprocess.Popen(
+                cmd_str,
+                shell=True,
+                cwd=str(cmd_dir),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return (
+                f"Started background command (PID {proc.pid}): {cmd_str}\n"
+                f"Note: This process will continue running until it exits or is manually stopped."
+            )
+        
+        # Foreground command with timeout
         timeout_ms = timeout if timeout else DEFAULT_TIMEOUT
         timeout_sec = timeout_ms / 1000.0
         
-        # Execute command
         result = subprocess.run(
-            command,
+            cmd_str,
             shell=True,
             cwd=str(cmd_dir),
+            stdin=subprocess.DEVNULL,  # Explicitly disable stdin to prevent interactive prompts
             capture_output=True,
             text=True,
             timeout=timeout_sec,
