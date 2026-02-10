@@ -9,7 +9,7 @@ import os
 import json
 import re
 from pathlib import Path
-from typing import TypedDict, List, Literal, Dict, Any
+from typing import TypedDict, List, Literal, Dict, Any, Optional
 from typing_extensions import Annotated
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
@@ -29,7 +29,8 @@ from ..tools.system_tools import (
     grep, glob, list_files, bash, webfetch,
     todowrite, todoread, question,
     task, websearch, codesearch, batch, lsp,
-    plan_exit, plan_enter
+    plan_exit, plan_enter,
+    __all__ as TOOL_NAMES,
 )
 
 
@@ -142,21 +143,44 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
     """
     content = json_data.get("content", "")
     tool_calls_data = json_data.get("tool_calls", [])
-    
-    # Convert tool_calls to LangChain format
+
+    # Helper to normalize/validate tool names against our registry
+    def normalize_tool_name(raw: str) -> Optional[str]:
+        if not raw:
+            return None
+        # Exact match
+        if raw in TOOL_NAMES:
+            return raw
+        # Strip common namespace prefixes like "functions." or "tools."
+        if "." in raw:
+            last = raw.split(".")[-1]
+            if last in TOOL_NAMES:
+                return last
+        # Strip unsupported characters and re-check
+        cleaned = re.sub(r"[^a-zA-Z0-9_-]", "", raw)
+        if cleaned in TOOL_NAMES:
+            return cleaned
+        return None
+
+    # Convert tool_calls to LangChain format, dropping invalid/unknown tools
     tool_calls = []
     for tc in tool_calls_data:
+        raw_name = tc.get("name", "")
+        name = normalize_tool_name(raw_name)
+        if not name:
+            # Treat unknown/invalid tool names as plain content; skip the call
+            continue
         tool_calls.append({
-            "name": tc.get("name", ""),
+            "name": name,
             "args": tc.get("arguments", {}),
             "id": tc.get("id", f"call_{len(tool_calls)}"),
         })
-    
-    # Create new AIMessage (tool_calls must be a list, not None)
-    return AIMessage(
-        content=content,
-        tool_calls=tool_calls,
-    )
+
+    # Create new AIMessage; if no valid tools, tool_calls will be empty (no function calling)
+    msg_kwargs = {"content": content}
+    if tool_calls:
+        msg_kwargs["tool_calls"] = tool_calls
+    return AIMessage(**msg_kwargs)
 
 
 # ============================================================================

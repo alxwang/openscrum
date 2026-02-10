@@ -110,19 +110,19 @@ class ChatRequest(BaseModel):
     message: str
     mode: str = "plan"  # "plan" or "edit"
     workspace_root: str = None  # Optional override
-    session_id: Optional[str] = None  # Optional session ID (creates new if not provided)
-    command: Optional[str] = None  # e.g. "init" -> substitute message with command prompt, mark project initialized on success
+    session_id: str | None = None  # Optional session ID (creates new if not provided)
+    command: str | None = None  # e.g. "init" -> substitute message with command prompt, mark project initialized on success
 
 
 class ChatChunk(BaseModel):
     """Streaming chat chunk."""
     type: str  # "token", "tool_call", "tool_result", "done", "error", "permission_request"
     content: str = ""
-    tool_name: Optional[str] = None
-    tool_input: Optional[dict] = None
-    tool_output: Optional[str] = None
+    tool_name: str | None = None
+    tool_input: dict | None = None
+    tool_output: str | None = None
     # When type=="permission_request", client must POST /permissions/{id}/reply before tool runs
-    permission_request: Optional[dict] = None
+    permission_request: dict | None = None
 
 
 def _sse_chunk(chunk_type: str, content: str = "", **kwargs) -> str:
@@ -230,7 +230,7 @@ async def stream_agent_response_with_save(
     initial_state: AgentState,
     session_id: str,
     user_message_id: str,
-    session_permission_ruleset: Optional[list] = None,
+    session_permission_ruleset: list | None = None,
 ) -> AsyncIterator[str]:
     """
     Stream agent responses and save assistant message/parts to session.
@@ -593,11 +593,11 @@ async def chat(request: ChatRequest):
 if SESSION_AVAILABLE:
     @app.get("/sessions", summary="List sessions")
     async def list_sessions(
-        directory: Optional[str] = None,
+        directory: str | None = None,
         roots: bool = False,
-        start: Optional[int] = None,
-        search: Optional[str] = None,
-        limit: Optional[int] = None,
+        start: int | None = None,
+        search: str | None = None,
+        limit: int | None = None,
     ):
         session_svc = get_session()
         return [dict(s) for s in session_svc.list(
@@ -620,16 +620,16 @@ if SESSION_AVAILABLE:
 
     @app.post("/sessions", summary="Create session")
     async def create_session(
-        directory: Optional[str] = None,
-        title: Optional[str] = None,
-        parent_id: Optional[str] = None,
+        directory: str | None = None,
+        title: str | None = None,
+        parent_id: str | None = None,
     ):
         session_svc = get_session()
         directory = directory or WORKSPACE_ROOT
         return session_svc.create(directory=directory, title=title, parent_id=parent_id)
 
     @app.patch("/sessions/{session_id}", summary="Update session")
-    async def update_session(session_id: str, title: Optional[str] = None):
+    async def update_session(session_id: str, title: str | None = None):
         session_svc = get_session()
         def editor(d):
             if title is not None:
@@ -653,12 +653,12 @@ if SESSION_AVAILABLE:
         return [dict(s) for s in session_svc.children(session_id)]
 
     @app.get("/sessions/{session_id}/messages", summary="Get session messages")
-    async def session_messages(session_id: str, limit: Optional[int] = None):
+    async def session_messages(session_id: str, limit: int | None = None):
         session_svc = get_session()
         return session_svc.messages(session_id=session_id, limit=limit)
 
     @app.post("/sessions/{session_id}/fork", summary="Fork session")
-    async def fork_session(session_id: str, message_id: Optional[str] = None):
+    async def fork_session(session_id: str, message_id: str | None = None):
         session_svc = get_session()
         return session_svc.fork(session_id=session_id, message_id=message_id)
 
@@ -866,7 +866,7 @@ if PERMISSION_AVAILABLE:
 
     class PermissionReplyBody(BaseModel):
         reply: Literal["once", "always", "reject"]
-        message: Optional[str] = None
+        message: str | None = None
 
     @app.post("/permissions/{request_id}/reply", summary="Respond to permission request")
     async def permission_reply(request_id: str, body: PermissionReplyBody):

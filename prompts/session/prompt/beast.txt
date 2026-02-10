@@ -87,7 +87,20 @@ Carefully read the issue and think hard about a plan to solve it before coding.
 
 ## 7. Shell Commands and Background Processes
 - Use the `bash` tool for running shell commands.
-- For commands that are unlikely to stop on their own (e.g. dev servers like `npm run serve`, `node server.js`), start them in the **background** using `&` (e.g. `npm run serve &`) so that the command returns and does not block.
+- **CRITICAL - Background Processes:** For commands that run continuously or don't stop on their own (e.g. dev servers, watchers, daemons), you **MUST** start them in the **background** by appending `&` at the end of the command. Examples:
+  - `npm run dev &` (NOT `npm run dev`)
+  - `npm run serve &` (NOT `npm run serve`)
+  - `node server.js &` (NOT `node server.js`)
+  - `python manage.py runserver &` (NOT `python manage.py runserver`)
+  - `flask run &` (NOT `flask run`)
+  - `uvicorn main:app &` (NOT `uvicorn main:app`)
+  - `rails server &` (NOT `rails server`)
+  - `yarn start &` (NOT `yarn start`)
+  - `npm start &` (NOT `npm start`)
+- **Timeout Detection:** If a previous bash tool call resulted in a timeout error, this is a strong indication that the command was a long-running process. You should:
+  1. Check if the command was starting a server, watcher, or continuous process
+  2. If yes, retry the same command but add `&` at the end to run it in the background
+  3. Inform the user that you're restarting the process in background mode
 - Avoid shell commands that require interactive input (e.g. CLI wizards that prompt for choices). Prefer non-interactive flags such as `-y`, `--default`, or `-d` when available.
 - If an interactive command fails because it expected user input, inspect the output and rerun it using a non-interactive option.
 
