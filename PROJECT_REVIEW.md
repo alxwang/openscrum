@@ -2,18 +2,17 @@
 
 **Goal:** Python replica of OpenCode  
 **Date:** February 9, 2026  
-**Status:** Foundation Complete, Missing Key Components
+**Status:** Phase 1 Complete (Session, Permission, Storage); Provider/Config/Advanced Session Pending
 
 ## 🎯 **Executive Summary**
 
-OpenScrum is a Python replica of OpenCode, implementing a client-server architecture with LangGraph orchestration. The project has a **solid foundation (~40% complete)** with core agent workflow, prompt system, and basic tools implemented. However, **critical infrastructure is missing** for production use:
+OpenScrum is a Python replica of OpenCode, implementing a client-server architecture with LangGraph orchestration. **Phase 1 is complete:**
 
-- ❌ **Session Management** - No conversation persistence
-- ❌ **Permission System** - No security/approval workflow  
-- ❌ **Storage Layer** - No data persistence
-- ⚠️ **6 Missing Tools** - task, websearch, codesearch, batch, lsp, plan tools
+- ✅ **Session Management** — Persistence, status, message history, fork, session-based chat
+- ✅ **Permission System** — Rules, ask/reply, tool layer, TUI confirmation
+- ✅ **Storage Layer** — File-based JSON; session, message, todo, project, permission keys
 
-**Recommendation:** Implement Phase 1 (Session, Permission, Storage) before production deployment.
+Remaining gaps: provider abstraction, config system, advanced session (share/revert/compaction), some tools (skill, external-directory), tests, and docs. See **COMPARISON_OPENCODE.md** for a full OpenScrum vs OpenCode comparison.
 
 ---
 
@@ -46,41 +45,37 @@ OpenScrum is a Python replica of OpenCode, implementing a client-server architec
   - Context injection (cwd, os_name, project_structure)
   - Dynamic prompt loading
 
-### 3. **System Tools** ✓ (13/19 tools)
+### 3. **System Tools** ✓ (most opencode tools)
 **Implemented:**
-- ✅ `read` - File reading with line numbers
-- ✅ `write` - File writing
-- ✅ `edit` - String replacement
-- ✅ `multiedit` - Multiple sequential edits
-- ✅ `apply_patch` - Patch format application
-- ✅ `grep` - Regex content search
-- ✅ `glob` - File pattern matching
-- ✅ `list_files` - Directory listing
-- ✅ `bash` - Command execution
-- ✅ `webfetch` - URL fetching
-- ✅ `todowrite` - Todo list management (placeholder)
-- ✅ `todoread` - Todo list reading (placeholder)
-- ✅ `question` - User questions (placeholder)
+- ✅ `read`, `write`, `edit`, `multiedit`, `apply_patch`, `grep`, `glob`, `list_files`, `bash`, `webfetch`
+- ✅ `todowrite` / `todoread` — Storage-backed via `server/storage/todo.py`
+- ✅ `question` — Placeholder
+- ✅ `task` — Placeholder (no full subagent wiring)
+- ✅ `websearch` — Exa (env API key)
+- ✅ `codesearch` — Exa Code (env API key)
+- ✅ `batch` — Parallel tool execution
+- ✅ `lsp` — Operations (LSP client TBD)
+- ✅ `plan_exit` / `plan_enter`
 
-**Missing from Reference:**
-- ❌ `task` - Subagent launching
-- ❌ `websearch` - Exa AI web search
-- ❌ `codesearch` - Exa Code API search
-- ❌ `batch` - Parallel tool execution
-- ❌ `lsp` - Language Server Protocol integration
+**Not implemented:** skill, external-directory; truncation/doom-loop handling.
 
-### 4. **Project Structure** ✓
+### 4. **Session, Permission, Storage** ✓ (Phase 1)
+- **Session:** `server/session/` — session.py, message.py, status.py, id_util.py; API: list, get, create, patch, delete, children, messages, fork, status, todo, **message** (session-based chat).
+- **Permission:** `server/permission/` — permission.py, wildcard.py; tool wrapper in `server/tools/permission_layer.py`; API: GET pending, POST reply; TUI PermissionScreen.
+- **Storage:** `server/storage/` — storage.py, todo.py, project.py; file-based JSON under `~/.openscrum/storage` (or `OPENSCRUM_DATA_DIR`).
+
+### 5. **Project Structure** ✓
 ```
 openscrum/
 ├── server/
 │   ├── main.py              # FastAPI server
-│   ├── agent/
-│   │   ├── graph.py         # LangGraph state machine
-│   │   └── prompt_registry.py
-│   └── tools/
-│       └── system_tools.py  # 13 tools implemented
+│   ├── agent/               # LangGraph, prompt_registry
+│   ├── session/             # Session, message, status, id_util
+│   ├── permission/          # Permission, wildcard
+│   ├── storage/             # Storage, todo, project
+│   └── tools/               # system_tools, permission_layer, context
 ├── client/
-│   └── tui.py               # Textual TUI
+│   └── tui.py               # Textual TUI (session + permission UI)
 ├── prompts/
 │   └── manifest.json        # Prompt registry
 └── environment.yml          # Mamba environment
@@ -88,76 +83,9 @@ openscrum/
 
 ---
 
-## ❌ **Critical Missing Components**
+## ❌ **Remaining Gaps (Post–Phase 1)**
 
-### 1. **Session Management** 🔴 HIGH PRIORITY
-**Reference:** `opencode/packages/opencode/src/session/`
-
-**Missing:**
-- Session persistence (Storage layer)
-- Session state tracking (idle/busy/retry)
-- Message history management
-- Session lifecycle (create, update, fork)
-- Parent/child session relationships
-
-**Impact:** Without sessions, the agent can't maintain conversation context across requests.
-
-**Recommendation:**
-```python
-# server/session/session.py needed
-class Session:
-    - id: str
-    - messages: List[Message]
-    - state: SessionState
-    - workspace_root: str
-    - created_at: datetime
-    - updated_at: datetime
-```
-
-### 2. **Permission System** 🔴 HIGH PRIORITY
-**Reference:** `opencode/packages/opencode/src/permission/`
-
-**Missing:**
-- Permission ruleset evaluation
-- Tool execution authorization
-- User approval workflow
-- Pattern-based permission matching
-- "always allow" patterns
-
-**Impact:** Tools can execute without user approval, security risk.
-
-**Current State:** Tools execute directly without permission checks.
-
-**Recommendation:**
-```python
-# server/permission/permission.py needed
-class PermissionSystem:
-    - evaluate(permission: str, pattern: str, ruleset: Ruleset) -> Action
-    - ask(request: PermissionRequest) -> Promise[bool]
-    - Ruleset with allow/deny/ask actions
-```
-
-### 3. **Storage Layer** 🟡 MEDIUM PRIORITY
-**Reference:** `opencode/packages/opencode/src/storage/`
-
-**Missing:**
-- Persistent storage for sessions
-- Todo list persistence
-- Permission approvals storage
-- Project metadata storage
-
-**Impact:** No persistence between server restarts.
-
-**Recommendation:**
-```python
-# server/storage/storage.py needed
-class Storage:
-    - write(key: List[str], value: Any)
-    - read(key: List[str]) -> Any
-    - Uses file-based or database storage
-```
-
-### 4. **Provider Abstraction** 🟡 MEDIUM PRIORITY
+### 1. **Provider Abstraction** 🟡 MEDIUM PRIORITY
 **Reference:** `opencode/packages/opencode/src/provider/`
 
 **Missing:**
@@ -177,34 +105,7 @@ class Provider:
     - Supports OpenAI, Anthropic, Gemini, etc.
 ```
 
-### 5. **Missing Tools** 🟡 MEDIUM PRIORITY
-
-**`task` Tool:**
-- Launches subagents for complex tasks
-- Requires agent registry and session management
-- Critical for multi-agent workflows
-
-**`websearch` Tool:**
-- Exa AI integration
-- Requires API key configuration
-- Used for real-time information
-
-**`codesearch` Tool:**
-- Exa Code API integration
-- Requires API key
-- Used for code context retrieval
-
-**`batch` Tool:**
-- Parallel tool execution
-- Performance optimization
-- Requires tool registry improvements
-
-**`lsp` Tool:**
-- Language Server Protocol integration
-- Requires LSP client setup
-- Used for code intelligence
-
-### 6. **Configuration System** 🟢 LOW PRIORITY
+### 2. **Configuration System** 🟢 LOW PRIORITY
 **Reference:** `opencode/packages/opencode/src/config/`
 
 **Missing:**
@@ -223,7 +124,7 @@ class Config:
     - Environment variable expansion
 ```
 
-### 7. **Project/Instance Management** 🟢 LOW PRIORITY
+### 3. **Project/Instance Management** 🟢 LOW PRIORITY
 **Reference:** `opencode/packages/opencode/src/project/`
 
 **Missing:**
@@ -234,7 +135,7 @@ class Config:
 
 **Current State:** Uses `os.getcwd()` directly.
 
-### 8. **Message System** 🟡 MEDIUM PRIORITY
+### 4. **Message System** 🟡 MEDIUM PRIORITY
 **Reference:** `opencode/packages/opencode/src/session/message-v2.ts`
 
 **Missing:**
@@ -310,14 +211,14 @@ def read(file_path: str) -> str:
 - ✅ Task management: 2/2 (100%) - But placeholders
 - ✅ Advanced: 1/6 (17%) - Missing task, codesearch, batch, lsp
 
-### Core Systems: 3/8 (38%)
+### Core Systems: 6/8 (Phase 1 done)
 - ✅ Agent Graph: Implemented
 - ✅ Prompt Registry: Implemented
 - ✅ Server API: Implemented
-- ❌ Session Management: Missing
-- ❌ Permission System: Missing
-- ❌ Storage Layer: Missing
-- ❌ Provider Abstraction: Partial
+- ✅ Session Management: Implemented (session, message, status, session-based chat)
+- ✅ Permission System: Implemented (rules, ask/reply, tool layer, TUI)
+- ✅ Storage Layer: Implemented (file JSON, todo, project)
+- ❌ Provider Abstraction: Partial (hardcoded in main)
 - ❌ Config System: Missing
 
 ### Client: 1/1 (100%)
@@ -327,28 +228,14 @@ def read(file_path: str) -> str:
 
 ## 🎯 **Priority Recommendations**
 
-### **Phase 1: Critical Foundation** (Must Have)
-1. **Session Management**
-   - Create `server/session/session.py`
-   - Implement session persistence
-   - Add message history tracking
-
-2. **Permission System**
-   - Create `server/permission/permission.py`
-   - Implement ruleset evaluation
-   - Add user approval workflow
-
-3. **Storage Layer**
-   - Create `server/storage/storage.py`
-   - File-based or SQLite storage
-   - Session/todo/permission persistence
+### **Phase 1: Critical Foundation** ✅ DONE
+1. **Session Management** — Done (`server/session/`, session-based chat)
+2. **Permission System** — Done (`server/permission/`, tool layer, TUI)
+3. **Storage Layer** — Done (`server/storage/`, todo, project)
 
 ### **Phase 2: Core Features** (Should Have)
-4. **Missing Tools**
-   - Implement `task` tool (subagent launching)
-   - Implement `websearch` tool (Exa AI)
-   - Implement `codesearch` tool (Exa Code)
-   - Implement `batch` tool (parallel execution)
+4. **Remaining Tools / Polish**
+   - Implement `skill`, `external-directory` if needed; truncation/doom-loop handling
 
 5. **Provider Abstraction**
    - Create unified provider interface
@@ -431,10 +318,10 @@ def read(file_path: str) -> str:
 ## 📝 **Action Items**
 
 ### Immediate (Before Production)
-- [ ] Implement session management
-- [ ] Add permission system
-- [ ] Create storage layer
-- [ ] Fix tool context injection
+- [x] Implement session management
+- [x] Add permission system
+- [x] Create storage layer
+- [ ] Formalize tool context (session_id, abort) if needed
 - [ ] Add error handling
 
 ### Short Term (Next Sprint)
@@ -454,12 +341,12 @@ def read(file_path: str) -> str:
 
 ## 📈 **Progress Summary**
 
-**Overall Completion: ~40%**
+**Overall Completion: Phase 1 complete**
 
 - ✅ Foundation: 80% (Graph, Server, Client, Prompts)
-- ⚠️ Core Systems: 30% (Missing Session, Permission, Storage)
-- ✅ Tools: 68% (13/19 implemented)
-- ❌ Advanced Features: 10% (Missing most advanced tools)
+- ✅ Core Systems: Session, Permission, Storage implemented
+- ✅ Tools: Most opencode tools (websearch, codesearch, batch, lsp, plan; no skill/external-directory)
+- ⚠️ Advanced: Provider, config, share/revert/compaction, tests, docs pending
 
 **Code Statistics:**
 - Total lines (Python + JSON): 2,043 lines
@@ -468,7 +355,7 @@ def read(file_path: str) -> str:
 - Tools: ~750 lines
 - Prompts manifest: 198 lines
 
-**Status:** Solid foundation, but missing critical infrastructure for production use.
+**Status:** Phase 1 (Session, Permission, Storage) complete; see COMPARISON_OPENCODE.md for full OpenScrum vs OpenCode comparison.
 
 ---
 
@@ -497,13 +384,14 @@ All required dependencies are listed in:
 
 ## 🚀 **Next Steps**
 
-1. **Start with Session Management** - Everything depends on this
-2. **Add Permission System** - Security critical
-3. **Implement Storage** - Enables persistence
-4. **Complete Missing Tools** - Feature parity
-5. **Add Tests** - Quality assurance
+1. **Provider abstraction** — Centralize LLM/model selection (opencode’s provider layer).
+2. **Config system** — Optional JSONC for agents, permissions, defaults.
+3. **Error handling** — Custom exceptions and consistent handling in routes/tools.
+4. **Session extras** — Abort; share/revert/summarize if needed.
+5. **Tests** — Unit tests for storage, session, permission; integration test for session chat.
+6. **Docs** — README (install, run, env) and short architecture/API overview.
 
-The project has a strong foundation but needs the core infrastructure components to be a complete replica of OpenCode.
+See **COMPARISON_OPENCODE.md** for a full OpenScrum vs OpenCode comparison and next steps.
 
 ---
 

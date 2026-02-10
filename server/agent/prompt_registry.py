@@ -13,28 +13,35 @@ from jinja2 import Template, Environment, FileSystemLoader
 
 class PromptRegistry:
     """Registry for loading and rendering prompts with context injection."""
-    
-    def __init__(self, manifest_path: str = "prompts/manifest.json", workspace_root: Optional[str] = None):
+
+    def __init__(
+        self,
+        manifest_path: str = "prompts/manifest.json",
+        workspace_root: Optional[str] = None,
+        app_root: Optional[str] = None,
+    ):
         """
         Initialize the prompt registry.
-        
+
         Args:
-            manifest_path: Path to manifest.json relative to workspace root
-            workspace_root: Workspace root directory (defaults to current working directory)
+            manifest_path: Path to manifest.json relative to app root (or workspace if app_root not set)
+            workspace_root: User workspace directory (for context: cwd, project_structure)
+            app_root: OpenScrum app directory containing prompts/ (default: use workspace_root)
         """
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
-        manifest_file = self.workspace_root / manifest_path
-        
-        with open(manifest_file, 'r') as f:
+        # Load manifest and prompts from app root so they work when workspace is user's project
+        self._prompts_base = Path(app_root) if app_root else self.workspace_root
+        manifest_file = self._prompts_base / manifest_path
+
+        with open(manifest_file, "r", encoding="utf-8") as f:
             self.manifest = json.load(f)
-        
-        # Set up Jinja2 environment
-        prompts_dir = self.workspace_root / "prompts"
+
+        prompts_dir = self._prompts_base / "prompts"
         self.env = Environment(
             loader=FileSystemLoader(str(prompts_dir)),
             autoescape=False,
             trim_blocks=True,
-            lstrip_blocks=True
+            lstrip_blocks=True,
         )
     
     def get_prompt_path(self, key: str) -> Optional[Path]:
@@ -43,7 +50,8 @@ class PromptRegistry:
             return None
         
         prompt_info = self.manifest[key]
-        prompt_path = self.workspace_root / prompt_info["path"]
+        base = getattr(self, "_prompts_base", self.workspace_root)
+        prompt_path = base / prompt_info["path"]
         return prompt_path if prompt_path.exists() else None
     
     def get_prompt(
@@ -71,7 +79,7 @@ class PromptRegistry:
         
         # Load template
         # Calculate relative path from prompts directory
-        prompts_dir = self.workspace_root / "prompts"
+        prompts_dir = self._prompts_base / "prompts"
         try:
             relative_path = prompt_path.relative_to(prompts_dir)
         except ValueError:

@@ -8,6 +8,7 @@ All LLM communication is forced to JSON format.
 import os
 import json
 import re
+from pathlib import Path
 from typing import TypedDict, List, Literal, Dict, Any
 from typing_extensions import Annotated
 
@@ -19,6 +20,10 @@ from langgraph.prebuilt import ToolNode
 from langgraph.graph.message import add_messages
 
 from .prompt_registry import PromptRegistry
+try:
+    from server.instruction import system as instruction_system
+except ImportError:
+    from instruction import system as instruction_system
 from ..tools.system_tools import (
     read, write, edit, multiedit, apply_patch,
     grep, glob, list_files, bash, webfetch,
@@ -43,18 +48,21 @@ class AgentState(TypedDict):
 # Prompt Registry Setup
 # ============================================================================
 
-def create_prompt_registry(workspace_root: str = None) -> PromptRegistry:
-    """Create and configure the prompt registry."""
-    return PromptRegistry(workspace_root=workspace_root)
+def create_prompt_registry(workspace_root: str = None, app_root: str = None) -> PromptRegistry:
+    """Create and configure the prompt registry. Uses app_root for prompts/ so they work when workspace is user's project."""
+    if app_root is None:
+        # OpenScrum app root = directory containing server/ and prompts/
+        app_root = str(Path(__file__).resolve().parent.parent.parent)
+    return PromptRegistry(workspace_root=workspace_root, app_root=app_root)
 
 
 # ============================================================================
 # Tool Setup
 # ============================================================================
 
-def get_tools():
-    """Get all available tools for the agent."""
-    return [
+def get_tools(workspace_root: str = None):
+    """Get all available tools for the agent. Wraps with permission layer when available."""
+    base = [
         read,
         write,
         edit,
@@ -76,6 +84,17 @@ def get_tools():
         plan_exit,
         plan_enter,
     ]
+    try:
+        from server.tools.permission_layer import wrap_tool_with_permission
+        root = workspace_root or ""
+        return [wrap_tool_with_permission(t, workspace_root=root) for t in base]
+    except ImportError:
+        try:
+            from tools.permission_layer import wrap_tool_with_permission
+            root = workspace_root or ""
+            return [wrap_tool_with_permission(t, workspace_root=root) for t in base]
+        except ImportError:
+            return base
 
 
 # ============================================================================
@@ -133,10 +152,10 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
             "id": tc.get("id", f"call_{len(tool_calls)}"),
         })
     
-    # Create new AIMessage
+    # Create new AIMessage (tool_calls must be a list, not None)
     return AIMessage(
         content=content,
-        tool_calls=tool_calls if tool_calls else None,
+        tool_calls=tool_calls,
     )
 
 
@@ -144,19 +163,31 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
 # Graph Nodes
 # ============================================================================
 
-def planner_node(state: AgentState, llm: BaseChatModel, registry: PromptRegistry) -> AgentState:
+def planner_node(
+    state: AgentState,
+    llm: BaseChatModel,
+    registry: PromptRegistry,
+    workspace_root: str = None,
+) -> AgentState:
     """
     Planner node - generates a plan without executing tools.
     
     Uses PLAN_MODE_SYSTEM_REMINDER prompt and operates in read-only mode.
     All responses are parsed as JSON.
+    AGENTS.md / CLAUDE.md (project + global) are appended to system prompt.
     """
     # Get plan mode prompt with context injection and JSON enforcement
     system_prompt = registry.get_prompt("PLAN_MODE_SYSTEM_REMINDER", force_json=True)
-    
+    if workspace_root:
+        parts = instruction_system(workspace_root)
+        if parts:
+            system_prompt = system_prompt.rstrip() + "\n\n" + "\n\n".join(parts)
+    # Escape literal braces so ChatPromptTemplate does not treat JSON examples as variables
+    system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
+
     # Build messages
     messages = state["messages"]
-    
+
     # Create prompt with system message
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
@@ -180,20 +211,32 @@ def planner_node(state: AgentState, llm: BaseChatModel, registry: PromptRegistry
     }
 
 
-def editor_node(state: AgentState, llm: BaseChatModel, registry: PromptRegistry) -> AgentState:
+def editor_node(
+    state: AgentState,
+    llm: BaseChatModel,
+    registry: PromptRegistry,
+    workspace_root: str = None,
+) -> AgentState:
     """
     Editor node - executes edits and tool calls.
     
     Uses BEAST_PROVIDER_SYSTEM prompt (or similar) and has access to all tools.
     All responses are parsed as JSON.
+    AGENTS.md / CLAUDE.md (project + global) are appended to system prompt.
     """
     # Get editor mode prompt with context injection and JSON enforcement
     # Using BEAST_PROVIDER_SYSTEM as the main system prompt for edit mode
     system_prompt = registry.get_prompt("BEAST_PROVIDER_SYSTEM", force_json=True)
-    
+    if workspace_root:
+        parts = instruction_system(workspace_root)
+        if parts:
+            system_prompt = system_prompt.rstrip() + "\n\n" + "\n\n".join(parts)
+    # Escape literal braces so ChatPromptTemplate does not treat JSON examples as variables
+    system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
+
     # Build messages
     messages = state["messages"]
-    
+
     # Bind tools to LLM
     tools = get_tools()
     llm_with_tools = llm.bind_tools(tools)
@@ -211,11 +254,12 @@ def editor_node(state: AgentState, llm: BaseChatModel, registry: PromptRegistry)
     # Parse JSON response if it contains JSON
     content = str(response.content) if hasattr(response, 'content') else ""
     
-    # If response has tool_calls, use them directly (LangChain handles this)
-    if hasattr(response, 'tool_calls') and response.tool_calls:
+    # Use response directly only if tool_calls is a valid list (LangChain requires list, not None)
+    raw_tool_calls = getattr(response, "tool_calls", None)
+    if isinstance(raw_tool_calls, list) and raw_tool_calls:
         parsed_response = response
     else:
-        # Parse JSON response for content
+        # Parse JSON or build AIMessage with tool_calls=[] so validation passes
         json_data = parse_json_response(content)
         parsed_response = create_ai_message_from_json(json_data, response)
     
@@ -234,6 +278,38 @@ def editor_node(state: AgentState, llm: BaseChatModel, registry: PromptRegistry)
         "mode": "edit",
         "scratchpad": state.get("scratchpad", "") + f"\n[EDIT] {scratchpad_content}...",
     }
+
+
+def _is_approval_phrase(content: str) -> bool:
+    """True if the user message is approving / asking to proceed with a plan."""
+    if not content or not isinstance(content, str):
+        return False
+    lower = content.strip().lower()
+    phrases = [
+        "proceed", "go ahead", "implement", "approve", "yes", "start",
+        "do it", "execute", "begin", "sounds good", "looks good", "approved",
+    ]
+    return any(p in lower for p in phrases)
+
+
+def route_entry(state: AgentState) -> Literal["planner", "editor"]:
+    """
+    Entry router: start at editor when user is approving an existing plan.
+    
+    If the last message is a user approval and the previous is an assistant message
+    (the plan), go straight to editor so the agent uses tools instead of asking
+    "which plan?". Otherwise start at planner.
+    """
+    messages = state["messages"]
+    if len(messages) < 2:
+        return "planner"
+    last = messages[-1]
+    prev = messages[-2]
+    if isinstance(last, HumanMessage) and isinstance(prev, AIMessage):
+        content = (last.content or "").strip().lower()
+        if _is_approval_phrase(content) or state.get("mode") == "edit":
+            return "editor"
+    return "planner"
 
 
 def should_continue_to_editor(state: AgentState) -> Literal["editor", END]:
@@ -256,8 +332,8 @@ def should_continue_to_editor(state: AgentState) -> Literal["editor", END]:
     
     # Check for user approval
     if isinstance(last_message, HumanMessage):
-        content = last_message.content.lower()
-        if any(keyword in content for keyword in ["yes", "approve", "go ahead", "implement", "start"]):
+        content = (last_message.content or "").strip().lower()
+        if _is_approval_phrase(content):
             return "editor"
     
     # Default: stay in plan mode or end
@@ -319,18 +395,20 @@ def create_agent_graph(
     # Create graph
     workflow = StateGraph(AgentState)
     
-    # Add nodes
-    workflow.add_node("planner", lambda state: planner_node(state, llm, registry))
-    workflow.add_node("editor", lambda state: editor_node(state, llm, registry))
+    # Router: no state change, only routes entry to planner or editor
+    workflow.add_node("router", lambda state: state)
+    wr = workspace_root or ""
+    workflow.add_node("planner", lambda state: planner_node(state, llm, registry, wr))
+    workflow.add_node("editor", lambda state: editor_node(state, llm, registry, wr))
     
-    # Add tool node
-    tools = get_tools()
+    # Add tool node (permission layer applied in get_tools when available)
+    tools = get_tools(workspace_root=workspace_root)
     tool_node = ToolNode(tools)
     workflow.add_node("tools", tool_node)
     
-    # Set entry point based on initial mode
-    # Entry point will be determined by initial state mode
-    workflow.set_entry_point("planner")  # Default to planner, can be overridden
+    # Entry: when user said "proceed with your plan", go to editor; else planner
+    workflow.set_entry_point("router")
+    workflow.add_conditional_edges("router", route_entry, {"planner": "planner", "editor": "editor"})
     
     # Add edges
     workflow.add_conditional_edges(

@@ -100,6 +100,23 @@ def read(
         
         if end < len(lines):
             output += f"\n... ({len(lines) - end} more lines)"
+
+        # Append AGENTS.md/CLAUDE.md from parent dirs (ref: opencode read tool + InstructionPrompt.resolve)
+        try:
+            from server.instruction import system_paths, resolve_instructions_for_file
+        except ImportError:
+            try:
+                from instruction import system_paths, resolve_instructions_for_file
+            except ImportError:
+                system_paths = resolve_instructions_for_file = None
+        if system_paths is not None and resolve_instructions_for_file is not None:
+            workspace = Path(WORKSPACE_ROOT).resolve()
+            exclude = set(system_paths(str(workspace)))
+            extra = resolve_instructions_for_file(str(workspace), resolved_path, exclude_paths=exclude)
+            if extra:
+                output += "\n\n<system-reminder>\n"
+                output += "\n\n".join(content for _fp, content in extra)
+                output += "\n</system-reminder>"
         
         return output
     

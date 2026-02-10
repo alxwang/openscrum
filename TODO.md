@@ -9,39 +9,64 @@
 ## 🔴 Phase 1: Critical Foundation (Must Have)
 
 ### Session Management
-- [ ] Create `server/session/session.py`
-- [ ] Implement `Session` class with:
+- [x] Create `server/session/session.py`
+- [x] Implement `Session` class with:
   - `id: str`
   - `messages: List[Message]`
   - `state: SessionState` (idle/busy/retry)
-  - `workspace_root: str`
-  - `created_at: datetime`
+  - `workspace_root: str` (as `directory`)
+  - `created_at: datetime` (as `time.created` / `time.updated`)
   - `updated_at: datetime`
-- [ ] Implement session persistence (Storage layer)
-- [ ] Add session state tracking (idle/busy/retry)
-- [ ] Implement message history management
-- [ ] Add session lifecycle methods (create, update, fork)
-- [ ] Implement parent/child session relationships
+- [x] Implement session persistence (Storage layer)
+- [x] Add session state tracking (idle/busy/retry)
+- [x] Implement message history management
+- [x] Add session lifecycle methods (create, update, fork)
+- [x] Implement parent/child session relationships
+
+**Implementation detail (ref opencode):**
+- **Session:** `opencode/packages/opencode/src/session/index.ts` — `Session.Info`, `create`, `get`, `update`, `fork`, `touch`, `list`, `children`, `remove`, `messages`, `updateMessage`, `removeMessage`, `updatePart`, `removePart`; storage key `["session", projectID, sessionID]`.
+- **Session status:** `opencode/packages/opencode/src/session/status.ts` — `SessionStatus.Info` (idle | busy | retry), in-memory `get`/`set`/`list`.
+- **Messages:** `opencode/packages/opencode/src/session/message.ts`, `message-v2.ts` — message/part schemas; storage keys `["message", sessionID, messageID]`, `["part", messageID, partID]`.
+- **Storage:** `opencode/packages/opencode/src/storage/storage.ts` — `write`, `read`, `update`, `list`, `remove`; file-based JSON under data dir.
+- **IDs:** `opencode/packages/opencode/src/id/id.ts` — prefixes `ses`, `msg`, `prt`; time-based + random.
+- **API:** `opencode/packages/opencode/src/server/routes/session.ts` — list, get, create, patch, delete, children, messages, fork, status.
 
 ### Permission System
-- [ ] Create `server/permission/permission.py`
-- [ ] Implement `PermissionSystem` class
-- [ ] Add permission ruleset evaluation
-- [ ] Implement tool execution authorization
-- [ ] Add user approval workflow
-- [ ] Implement pattern-based permission matching
-- [ ] Add "always allow" patterns support
+- [x] Create `server/permission/permission.py`
+- [x] Implement `PermissionSystem` class
+- [x] Add permission ruleset evaluation
+- [x] Implement tool execution authorization (ask/reply; tools call `await permission.ask()` when context available)
+- [x] Add user approval workflow
+- [x] Implement pattern-based permission matching
+- [x] Add "always allow" patterns support
+
+**Implementation detail (ref opencode):**
+- **Permission module:** `opencode/packages/opencode/src/permission/index.ts`, `next.ts` — `Permission.ask`/`respond`; `PermissionNext.ask`/`reply`/`evaluate`, ruleset (permission + pattern + action: allow|deny|ask), Reply: once|always|reject.
+- **Rules:** `PermissionNext.Rule`, `Ruleset`; `evaluate(permission, pattern, rulesets)` returns last matching rule (default ask); `fromConfig()` builds ruleset from config; `merge()`; `disabled_tools()` for edit tools.
+- **Wildcard:** `opencode/packages/opencode/src/util/wildcard.ts` — `match(str, pattern)` with `*`/`?`; pattern expand `~/`, `$HOME`.
+- **User workflow:** pending requests in memory; `ask()` async-awaits until `reply()`; reply "always" adds rule to approved and persists to storage; "reject" can include message (CorrectedError).
+- **API:** `opencode/packages/opencode/src/server/routes/permission.ts` — GET `/` list pending, POST `/:requestID/reply` with `{ reply, message? }`.
+- **Storage:** approved rules at `["permission", projectID]` (optional).
 
 ### Storage Layer
-- [ ] Create `server/storage/storage.py`
-- [ ] Implement `Storage` class with:
+- [x] Create `server/storage/storage.py`
+- [x] Implement `Storage` class with:
   - `write(key: List[str], value: Any)`
   - `read(key: List[str]) -> Any`
-- [ ] Choose storage backend (file-based or SQLite)
-- [ ] Implement session persistence
-- [ ] Implement todo list persistence
-- [ ] Implement permission approvals storage
-- [ ] Implement project metadata storage
+  - `update(key, editor)`, `list(prefix)`, `remove(key)`
+- [x] Choose storage backend (file-based or SQLite)
+- [x] Implement session persistence
+- [x] Implement todo list persistence
+- [x] Implement permission approvals storage
+- [x] Implement project metadata storage
+
+**Implementation detail (ref opencode):**
+- **Core:** `opencode/packages/opencode/src/storage/storage.ts` — file-based JSON; keys as path segments; `write`, `read`, `update`, `list`, `remove`; `NotFoundError`; data under `~/.openscrum/storage` (or `OPENSCRUM_DATA_DIR`).
+- **Session:** `["session", projectID, sessionID]` — session info (session/index.ts).
+- **Messages/parts:** `["message", sessionID, messageID]`, `["part", messageID, partID]` (session/index.ts, message-v2.ts).
+- **Todo:** `opencode/src/session/todo.ts` — `["todo", sessionID]`; `server/storage/todo.py` — `get_todos(session_id)`, `update_todos(session_id, todos)`; API: GET/PUT `/sessions/{id}/todo`.
+- **Permission:** `["permission", projectID]` — approved ruleset (permission/next.ts); loaded/saved in `PermissionSystem`.
+- **Project:** `opencode/src/project/project.ts` — `["project", projectID]`; `server/storage/project.py` — `get_project`, `write_project`, `update_project`, `list_projects`.
 
 ---
 
