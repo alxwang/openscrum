@@ -10,7 +10,7 @@ import os
 import json
 import time
 from pathlib import Path
-from typing import AsyncIterator, Literal, Optional
+from typing import Any, AsyncIterator, Literal, Optional
 
 # Load ~/.env so OPENAI_API_KEY and OPENAI_MODEL are available (e.g. when server is run without the launcher)
 try:
@@ -129,6 +129,18 @@ def _sse_chunk(chunk_type: str, content: str = "", **kwargs) -> str:
     """Format a ChatChunk as an SSE line."""
     chunk = ChatChunk(type=chunk_type, content=content, **kwargs)
     return f"data: {chunk.model_dump_json()}\n\n"
+
+
+def _normalize_tool_args(raw: Any) -> dict:
+    """Ensure tool args are a dict for streaming/logging. Parse JSON string if needed."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 # ============================================================================
@@ -292,30 +304,53 @@ async def stream_agent_response_with_save(
         while True:
             agent_task = asyncio.create_task(agent_iter.__anext__())
             state_update = None
+            
+            # Check for permission requests while waiting for agent step to complete
             while True:
+                # First, drain all permission requests already in the queue (non-blocking)
+                drained_any = False
+                while True:
+                    try:
+                        perm_info = permission_queue.get_nowait()
+                        drained_any = True
+                        _log.info("permission_request emitted (drained): id=%s", perm_info.get("id"))
+                        yield f"data: {ChatChunk(type='permission_request', permission_request=perm_info).model_dump_json()}\n\n"
+                        # Yield control briefly to allow event loop to process any incoming replies
+                        await asyncio.sleep(0)
+                    except asyncio.QueueEmpty:
+                        break
+                
+                # After draining, wait for either agent to complete OR new permission request
                 queue_task = asyncio.create_task(permission_queue.get())
                 done, pending = await asyncio.wait(
                     [agent_task, queue_task], return_when=asyncio.FIRST_COMPLETED
                 )
+                
                 if agent_task in done:
+                    # Agent step completed - get result and cancel queue monitoring
                     try:
                         state_update = agent_task.result()
+                        _log.debug("agent step completed, state_update type: %s", type(state_update).__name__)
                     except StopAsyncIteration:
                         state_update = None
                         _log.info("agent stream ended (graph finished)")
-                        break
                     except Exception as task_err:
                         _log.exception("agent task failed: %s", task_err)
                         raise
+                    # Cancel the queue_task since we're done with this step
                     queue_task.cancel()
                     try:
                         await queue_task
                     except asyncio.CancelledError:
                         pass
-                    break
+                    break  # Exit inner loop
+                
                 if queue_task in done:
+                    # New permission request arrived - emit it then loop back to drain more
                     perm_info = queue_task.result()
+                    _log.info("permission_request emitted (queued): id=%s", perm_info.get("id"))
                     yield f"data: {ChatChunk(type='permission_request', permission_request=perm_info).model_dump_json()}\n\n"
+                    # Loop back to drain any additional queued requests before waiting again
                     continue
             
             if state_update is None:
@@ -337,10 +372,13 @@ async def stream_agent_response_with_save(
                     # Handle tool calls
                     if hasattr(message, 'tool_calls') and message.tool_calls:
                         for tool_call in message.tool_calls:
-                            call_id = tool_call.get("id", f"call_{len(tool_calls_saved)}")
+                            _name = tool_call.get("name", "") if isinstance(tool_call, dict) else getattr(tool_call, "name", "") or ""
+                            call_id = tool_call.get("id", f"call_{len(tool_calls_saved)}") if isinstance(tool_call, dict) else getattr(tool_call, "id", f"call_{len(tool_calls_saved)}")
+                            raw_args = tool_call.get("args") if isinstance(tool_call, dict) else getattr(tool_call, "args", None)
+                            args = _normalize_tool_args(raw_args)
                             tool_calls_saved[call_id] = {
-                                "name": tool_call.get("name", ""),
-                                "args": tool_call.get("args", {}),
+                                "name": _name,
+                                "args": args,
                             }
                             # Save tool part (pending)
                             part = {
@@ -349,18 +387,18 @@ async def stream_agent_response_with_save(
                                 "session_id": session_id,
                                 "message_id": assistant_message_id,
                                 "call_id": call_id,
-                                "tool": tool_call.get("name", ""),
+                                "tool": _name,
                                 "state": {
                                     "status": "pending",
-                                    "input": tool_call.get("args", {}),
-                                    "raw": json.dumps(tool_call.get("args", {})),
+                                    "input": args,
+                                    "raw": json.dumps(args),
                                 },
                             }
                             session_svc.update_part(part)
                             chat_chunk = ChatChunk(
                                 type="tool_call",
-                                tool_name=tool_call.get("name", ""),
-                                tool_input=tool_call.get("args", {}),
+                                tool_name=_name,
+                                tool_input=args,
                             )
                             yield f"data: {chat_chunk.model_dump_json()}\n\n"
                     # Handle tool results
@@ -862,7 +900,20 @@ if PERMISSION_AVAILABLE:
     @app.get("/permissions", summary="List pending permissions")
     async def list_pending_permissions():
         """Get all pending permission requests across sessions."""
-        return _get_permission().list_pending()
+        pending = _get_permission().list_pending()
+        _log = logging.getLogger(__name__)
+        _log.info("GET /permissions returned %d pending", len(pending))
+        return pending
+    
+    @app.get("/permissions/debug", summary="Debug permission state")
+    async def debug_permissions():
+        """Debug endpoint to inspect permission system state."""
+        perm_sys = _get_permission()
+        return {
+            "pending_count": len(perm_sys._pending),
+            "pending_ids": list(perm_sys._pending.keys()),
+            "approved_count": len(perm_sys._approved),
+        }
 
     class PermissionReplyBody(BaseModel):
         reply: Literal["once", "always", "reject"]
@@ -871,8 +922,28 @@ if PERMISSION_AVAILABLE:
     @app.post("/permissions/{request_id}/reply", summary="Respond to permission request")
     async def permission_reply(request_id: str, body: PermissionReplyBody):
         """Approve (once/always) or reject a permission request."""
-        _get_permission().reply(request_id=request_id, reply=body.reply, message=body.message)
-        return True
+        _log = logging.getLogger(__name__)
+        _log.info("POST /permissions/%s/reply body=%s", request_id, body.model_dump())
+        
+        perm_sys = _get_permission()
+        
+        # Check if request exists
+        if request_id not in perm_sys._pending:
+            _log.warning("POST /permissions/%s/reply - request not found. pending=%s", 
+                        request_id, list(perm_sys._pending.keys()))
+            raise HTTPException(status_code=404, detail=f"Permission request {request_id} not found or already processed")
+        
+        try:
+            perm_sys.reply(request_id=request_id, reply=body.reply, message=body.message)
+            _log.info("POST /permissions/%s/reply completed successfully", request_id)
+            
+            # Give event loop time to process the scheduled future.set_result
+            await asyncio.sleep(0.01)
+            
+            return {"status": "ok", "request_id": request_id, "reply": body.reply}
+        except Exception as e:
+            _log.exception("POST /permissions/%s/reply failed: %s", request_id, e)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
@@ -895,4 +966,33 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import sys
+    # Configure logging to see permission flow
+    log_level = os.getenv("OPENSCRUM_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stdout,
+        force=True
+    )
+    # Set specific loggers to INFO to see permission flow
+    logging.getLogger("server.permission.permission").setLevel(logging.INFO)
+    logging.getLogger("server.main").setLevel(logging.INFO)
+    
+    _log = logging.getLogger(__name__)
+    _log.info("="*60)
+    _log.info("Starting OpenScrum Server")
+    _log.info("Workspace: %s", WORKSPACE_ROOT)
+    _log.info("Provider: %s, Model: %s", DEFAULT_PROVIDER, DEFAULT_MODEL)
+    _log.info("Session support: %s, Permission support: %s", SESSION_AVAILABLE, PERMISSION_AVAILABLE)
+    _log.info("="*60)
+    
+    # Use one worker so permission replies and the agent stream share the same process
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000, 
+        workers=1,
+        log_level=log_level.lower(),
+        access_log=True
+    )

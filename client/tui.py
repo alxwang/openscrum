@@ -130,7 +130,22 @@ class MessageInputTabMode(Message):
 class MessageInputWidget(Input):
     """Input: Enter=send, Ctrl+Enter=add newline to message, Tab=toggle Plan/Edit mode."""
 
-    def _on_key(self, event: Key) -> None:
+    def action_delete_left(self) -> None:
+        """Backspace: delete character before cursor. Override so it works when bindings fire instead of on_key."""
+        pos = self.cursor_position
+        if pos > 0:
+            self.value = self.value[: pos - 1] + self.value[pos:]
+            self.cursor_position = pos - 1
+
+    def action_delete_right(self) -> None:
+        """Delete: remove character after cursor. Override so it works when bindings fire instead of on_key."""
+        pos = self.cursor_position
+        n = len(self.value)
+        if pos < n:
+            self.value = self.value[:pos] + self.value[pos + 1 :]
+
+    def on_key(self, event: Key) -> None:
+        """Handle key so Enter sends, Ctrl+Enter adds newline, Tab toggles mode. Textual dispatches Key events to on_key."""
         key = (event.key or "").lower()
         # Let Ctrl+C always quit the app (Input would otherwise consume it)
         if key == "ctrl+c":
@@ -152,7 +167,44 @@ class MessageInputWidget(Input):
             self.post_message(MessageInputTabMode())
             event.prevent_default()
             return
-        super()._on_key(event)
+        # Always handle editing keys ourselves so they work regardless of base Input's on_key
+        pos = self.cursor_position
+        n = len(self.value)
+        if key in ("backspace", "ctrl+h") and pos > 0:
+            self.value = self.value[: pos - 1] + self.value[pos:]
+            self.cursor_position = pos - 1
+            event.prevent_default()
+            return
+        if key == "delete" and pos < n:
+            self.value = self.value[:pos] + self.value[pos + 1 :]
+            event.prevent_default()
+            return
+        if key == "left":
+            self.cursor_position = max(0, pos - 1)
+            event.prevent_default()
+            return
+        if key == "right":
+            self.cursor_position = min(n, pos + 1)
+            event.prevent_default()
+            return
+        if key in ("home", "ctrl+a"):
+            self.cursor_position = 0
+            event.prevent_default()
+            return
+        if key in ("end", "ctrl+e"):
+            self.cursor_position = n
+            event.prevent_default()
+            return
+        # Typing: use parent's on_key if available, else insert character ourselves
+        parent_on_key = getattr(super(), "on_key", None)
+        if callable(parent_on_key):
+            parent_on_key(event)
+        else:
+            char = getattr(event, "character", None)
+            if char:
+                self.value = self.value[:pos] + char + self.value[pos:]
+                self.cursor_position = pos + 1
+                event.prevent_default()
 
 
 # ============================================================================
@@ -233,12 +285,16 @@ class ChatWidget(Container):
         self._log_tail: deque = deque(maxlen=100)  # plain-text tail for copy
     
     def compose(self) -> ComposeResult:
-        """Create child widgets."""
+        """Create child widgets. Main area: left 1/3 messages, right 2/3 tool/terminal output."""
         yield Header(show_clock=True)
         
         with Vertical(id="chat-container"):
             yield Static("", id="title")
-            yield CopyableRichLog(id="chat-log", markup=True, wrap=True, log_tail=self._log_tail)
+            with Horizontal(id="main-split"):
+                with Container(id="panel-left"):
+                    yield CopyableRichLog(id="chat-log", markup=True, wrap=True, log_tail=self._log_tail)
+                with Container(id="panel-right"):
+                    yield RichLog(id="tool-output", markup=True, wrap=True)
             
             with Horizontal(id="input-container"):
                 yield MessageInputWidget(
@@ -247,6 +303,7 @@ class ChatWidget(Container):
                 )
                 yield Button("Send", id="send-button", variant="primary")
             
+            yield Static("", id="status-bar")
             yield Static("", id="hint-bar")
         
         yield Footer()
@@ -262,11 +319,32 @@ class ChatWidget(Container):
         """Called when widget is mounted."""
         self.workspace_root = os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
         self._set_chat_log_file()
+        self._clear_logs_on_start()
         self._focus_input()
         self._update_footer_mode()
         self._update_hint_bar()
         asyncio.create_task(self._fetch_model())
         asyncio.create_task(self.ensure_session())
+
+    def _clear_logs_on_start(self) -> None:
+        """Clear openscrum-chat.md, chat log, and tool output when TUI starts."""
+        root = (self.workspace_root or "").strip()
+        if root:
+            path = Path(root) / "openscrum-chat.md"
+            if path.parent.exists():
+                try:
+                    path.write_text("# OpenScrum Chat\n\n", encoding="utf-8")
+                except Exception:
+                    pass
+        self._log_tail.clear()
+        try:
+            self.query_one("#chat-log", RichLog).clear()
+        except Exception:
+            pass
+        try:
+            self.query_one("#tool-output", RichLog).clear()
+        except Exception:
+            pass
 
     def _set_chat_log_file(self) -> None:
         """Point chat log to workspace_root/openscrum-chat.md for easy access."""
@@ -365,6 +443,20 @@ class ChatWidget(Container):
         except Exception:
             pass
 
+    def _set_status(self, msg: str) -> None:
+        """Update the live status bar at the bottom (Sending, Receiving, Tool: x, etc.)."""
+        try:
+            self.query_one("#status-bar", Static).update(f"[bold cyan]{msg}[/bold cyan]")
+        except Exception:
+            pass
+
+    def _write_tool_output(self, text: str) -> None:
+        """Append to the right-panel tool/terminal output (no markup)."""
+        try:
+            self.query_one("#tool-output", RichLog).write(text)
+        except Exception:
+            pass
+
     @on(MessageInputTabMode)
     def on_tab_mode(self) -> None:
         """Tab: switch between Plan and Edit mode (OpenCode agent_cycle style)."""
@@ -423,9 +515,11 @@ class ChatWidget(Container):
         chat_log = self.query_one("#chat-log", RichLog)
         
         try:
+            self._set_status("Sending...")
             # Ensure we have a session
             await self.ensure_session()
             
+            self._set_status("Thinking...")
             # Show thinking indicator
             chat_log.write("[dim]Agent is thinking...[/dim]")
             
@@ -463,7 +557,9 @@ class ChatWidget(Container):
                     except Exception:
                         detail = body or response.reason_phrase
                     chat_log.write(f"[bold red]HTTP {response.status_code}:[/bold red] {detail}")
+                    self._set_status("Error")
                     return
+                self._set_status("Receiving...")
                 current_content = ""
                 stream_buffer = ""  # buffer for streaming tokens (RichLog has no end="")
                 agent_message_started = False
@@ -485,12 +581,12 @@ class ChatWidget(Container):
                         continue
                     
                     try:
-                        data = json.loads(line[6:])  # Remove "data: " prefix
+                        data = json.loads(line[6:].strip())  # Remove "data: " prefix
                         chunk_type = data.get("type")
                         
                         if chunk_type == "token":
+                            self._set_status("Receiving...")
                             if not agent_message_started:
-                                chat_log.clear()
                                 agent_message_started = True
                                 agent_line_prefix = True
                             content = data.get("content", "")
@@ -508,8 +604,9 @@ class ChatWidget(Container):
                                     chat_log.write(line_chunk)
                         
                         elif chunk_type == "tool_call":
+                            tool_name = data.get("tool_name") or "tool"
+                            self._set_status(f"Tool: {tool_name}")
                             if not agent_message_started:
-                                chat_log.clear()
                                 agent_message_started = True
                             else:
                                 flush_agent_stream()
@@ -522,42 +619,42 @@ class ChatWidget(Container):
                             chat_log.write(
                                 f"[yellow]🔧 Calling tool: [bold]{tool_name}[/bold][/yellow]"
                             )
-                            # For bash, show the actual command (and optional workdir).
-                            if tool_name == "bash":
-                                try:
-                                    cmd = (tool_input or {}).get("command")
-                                    workdir = (tool_input or {}).get("workdir")
-                                    if cmd:
-                                        chat_log.write(f"[dim]  command: {cmd}[/dim]")
-                                    if workdir:
-                                        chat_log.write(f"[dim]  workdir: {workdir}[/dim]")
-                                except Exception:
-                                    pass
-                            # Show effective working directory for commands (especially bash)
+                            # Right panel: terminal-style header and command/cwd
+                            self._write_tool_output(f"\n[bold]--- Tool: {tool_name} ---[/bold]\n")
                             try:
                                 workspace = (self.workspace_root or "").strip() or os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
                                 effective_cwd = None
                                 if tool_name == "bash":
+                                    cmd = (tool_input or {}).get("command")
                                     workdir = (tool_input or {}).get("workdir")
+                                    if cmd:
+                                        chat_log.write(f"[dim]  command: {cmd}[/dim]")
+                                        self._write_tool_output(f"[dim]$[/dim] {cmd}\n")
+                                    if workdir:
+                                        chat_log.write(f"[dim]  workdir: {workdir}[/dim]")
                                     if workdir:
                                         effective_cwd = str((Path(workspace) / workdir).resolve())
                                     elif workspace:
                                         effective_cwd = str(Path(workspace).resolve())
-                                elif workspace:
-                                    # For non-bash tools, workspace root is the implicit working directory
-                                    effective_cwd = str(Path(workspace).resolve())
-                                if effective_cwd:
-                                    chat_log.write(f"[dim]  cwd: {effective_cwd}[/dim]")
+                                    if effective_cwd:
+                                        chat_log.write(f"[dim]  cwd: {effective_cwd}[/dim]")
+                                        self._write_tool_output(f"[dim]cwd: {effective_cwd}[/dim]\n")
+                                else:
+                                    if workspace:
+                                        effective_cwd = str(Path(workspace).resolve())
+                                        if effective_cwd:
+                                            chat_log.write(f"[dim]  cwd: {effective_cwd}[/dim]")
+                                    if tool_input:
+                                        input_str = json.dumps(tool_input, indent=2)
+                                        if len(input_str) > 200:
+                                            input_str = input_str[:200] + "..."
+                                        chat_log.write(f"[dim]  Input: {input_str}[/dim]")
+                                        self._write_tool_output(f"[dim]{input_str}[/dim]\n")
                             except Exception:
                                 pass
-                            if tool_input:
-                                # Format tool input nicely
-                                input_str = json.dumps(tool_input, indent=2)
-                                if len(input_str) > 200:
-                                    input_str = input_str[:200] + "..."
-                                chat_log.write(f"[dim]  Input: {input_str}[/dim]")
                         
                         elif chunk_type == "permission_request":
+                            self._set_status("Waiting for permission...")
                             # Don't clear: keep "Calling tool: X" visible, then show permission below
                             if agent_message_started:
                                 flush_agent_stream()
@@ -601,23 +698,24 @@ class ChatWidget(Container):
                                 req_id, perm_name, patterns, tool_name
                             )
                             if reply and req_id:
-                                # Fire-and-forget: don't block stream reading. Server needs the
-                                # reply to unblock the tool; we must keep reading to receive
-                                # tool_result and avoid deadlock (server writing while we're blocked).
-                                async def _send_reply():
-                                    try:
-                                        await self.client.post(
-                                            f"{self.server_url}/permissions/{req_id}/reply",
-                                            json={"reply": reply},
-                                            timeout=10.0,
-                                        )
-                                    except Exception as e:
-                                        chat_log.write(f"[red]Permission reply failed: {e}[/red]")
-                                asyncio.create_task(_send_reply())
+                                # Await the reply so the server gets it before we read more
+                                # (matches test script behaviour and avoids races).
+                                try:
+                                    await self.client.post(
+                                        f"{self.server_url}/permissions/{req_id}/reply",
+                                        json={"reply": reply},
+                                        timeout=10.0,
+                                    )
+                                    # Show we sent the reply and are waiting for tool to run (avoids looking stuck)
+                                    self._set_status(f"Running tool: {tool_name}...")
+                                except Exception as e:
+                                    chat_log.write(f"[red]Permission reply failed: {e}[/red]")
+                                    self._set_status("Error")
                         
                         elif chunk_type == "tool_result":
+                            tool_name = data.get("tool_name") or current_tool
+                            self._set_status(f"Done: {tool_name}" if tool_name else "Receiving...")
                             if not agent_message_started:
-                                chat_log.clear()
                                 agent_message_started = True
                             # Tool result
                             tool_output = data.get("tool_output", "")
@@ -628,34 +726,40 @@ class ChatWidget(Container):
                                     f"[green]✓ Tool [bold]{tool_name}[/bold] completed[/green]"
                                 )
                                 if tool_output:
-                                    # Truncate long outputs
+                                    # Left panel: short preview
                                     output_preview = tool_output[:300]
                                     if len(tool_output) > 300:
                                         output_preview += f"\n... ({len(tool_output) - 300} more characters)"
-                                    # Show output in a code block style
                                     chat_log.write(f"[dim]{output_preview}[/dim]")
+                                    # Right panel: full terminal output
+                                    self._write_tool_output(tool_output if tool_output.endswith("\n") else tool_output + "\n")
+                                    self._write_tool_output("[dim]--- done ---[/dim]\n")
                                 current_tool = None
                         
                         elif chunk_type == "done":
+                            self._set_status("Ready")
                             if agent_message_started:
                                 flush_agent_stream()
                                 agent_message_started = False
                             else:
-                                # No token/tool_call received — clear "Agent is thinking..." and show placeholder
-                                chat_log.clear()
+                                # No token/tool_call received — show placeholder (don't clear; keep user message visible)
                                 chat_log.write("[dim]Agent: (no output)[/dim]")
                             current_content = ""
                             chat_log.write("[dim]---[/dim]")
                         
                         elif chunk_type == "error":
-                            if not agent_message_started:
-                                chat_log.clear()
+                            self._set_status("Error")
                             error_msg = data.get("content", "Unknown error")
                             chat_log.write(f"[bold red]Error:[/bold red] {error_msg}")
+                        else:
+                            # Unknown chunk type — avoid writing raw payload; log type only for debugging
+                            unknown = data.get("type", "?")
+                            chat_log.write(f"[dim]Received unknown event: {unknown}[/dim]")
                     
                     except json.JSONDecodeError:
                         continue
                     except Exception as e:
+                        self._set_status("Error")
                         chat_log.write(f"[bold red]Error processing chunk:[/bold red] {str(e)}")
         
         except httpx.HTTPStatusError as e:
@@ -666,19 +770,27 @@ class ChatWidget(Container):
                     detail = json.loads(body).get("detail", body)
             except Exception:
                 pass
+            self._set_status("Error")
             chat_log.write(f"[bold red]HTTP {e.response.status_code}:[/bold red] {detail}")
         except httpx.HTTPError as e:
+            self._set_status("Error")
             chat_log.write(f"[bold red]HTTP Error:[/bold red] {str(e)}")
         except Exception as e:
+            self._set_status("Error")
             chat_log.write(f"[bold red]Error:[/bold red] {str(e)}")
         finally:
+            self._set_status("")
             self._focus_input()
     
     def action_clear(self) -> None:
-        """Clear chat log."""
+        """Clear chat log and tool output panel."""
         chat_log = self.query_one("#chat-log", RichLog)
         chat_log.clear()
         self._log_tail.clear()
+        try:
+            self.query_one("#tool-output", RichLog).clear()
+        except Exception:
+            pass
         self._focus_input()
 
     def action_copy_log(self) -> None:
@@ -733,17 +845,56 @@ class OpenScrumApp(App):
         border-bottom: solid $primary;
     }
     
-    #chat-log {
+    #main-split {
         height: 1fr;
+        min-height: 5;
+    }
+    
+    #panel-left {
+        width: 1fr;
+        min-width: 12;
+        height: 100%;
         border: solid $primary;
         padding: 1;
-        margin: 1;
+        margin: 0 1 0 0;
+    }
+    
+    #panel-right {
+        width: 2fr;
+        min-width: 20;
+        height: 100%;
+        border: solid $primary;
+        padding: 1;
+        margin: 0;
+    }
+    
+    #chat-log {
+        height: 1fr;
+        padding: 0;
+        margin: 0;
+        border: none;
+    }
+    
+    #tool-output {
+        height: 1fr;
+        padding: 0;
+        margin: 0;
+        border: none;
+        background: $surface-darken-1;
     }
     
     #input-container {
         height: auto;
         padding: 1;
         border-top: solid $primary;
+    }
+    
+    #status-bar {
+        height: auto;
+        padding: 0 1;
+        text-align: left;
+        border-top: solid $primary 30%;
+        color: $primary;
     }
     
     #hint-bar {
@@ -807,14 +958,19 @@ class OpenScrumApp(App):
 def main():
     """Run the TUI application."""
     import sys
-    
+
     # Parse command line arguments
-    server_url = SERVER_URL
-    if len(sys.argv) > 1:
-        server_url = sys.argv[1]
-    
-    app = OpenScrumApp(server_url=server_url)
-    app.run()
+    server_url = (sys.argv[1] if len(sys.argv) > 1 else SERVER_URL).strip() or SERVER_URL
+
+    try:
+        app = OpenScrumApp(server_url=server_url)
+        app.run()
+    except Exception as e:
+        # Ensure terminal gets control back on crash (e.g. restore echo, cursor)
+        import traceback
+        sys.stderr.write(f"OpenScrum TUI error: {e}\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

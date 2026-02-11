@@ -3,20 +3,24 @@ LangGraph State Machine for OpenScrum Agent
 
 Implements the Plan -> Edit workflow with tool execution.
 All LLM communication is forced to JSON format.
+
+Tool execution: tools are run in the order they appear in the LLM response,
+one tool at a time (sequential). This ensures deterministic behavior and
+allows tools to depend on prior results.
 """
 
+import asyncio
 import os
 import json
 import re
 from pathlib import Path
-from typing import TypedDict, List, Literal, Dict, Any, Optional
+from typing import TypedDict, List, Literal, Dict, Any, Optional, Callable
 from typing_extensions import Annotated
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
 from langgraph.graph.message import add_messages
 
 from .prompt_registry import PromptRegistry
@@ -98,6 +102,66 @@ def get_tools(workspace_root: str = None):
             return base
 
 
+def create_sequential_tool_node(tools_list: list) -> Callable:
+    """
+    Build a tool node that executes tool_calls in the order they appear in the
+    LLM response, one tool at a time. This guarantees order and ensures only
+    one tool runs at a time (no parallel execution).
+    """
+    tools_by_name: Dict[str, Any] = {}
+    for t in tools_list:
+        n = getattr(t, "name", None)
+        if n:
+            tools_by_name[n] = t
+
+    async def _sequential_tools_node(state: AgentState) -> Dict[str, Any]:
+        messages = state.get("messages") or []
+        if not messages:
+            return {"messages": []}
+        last = messages[-1]
+        if not isinstance(last, AIMessage) or not getattr(last, "tool_calls", None):
+            return {"messages": []}
+        # Preserve exact order from LLM response
+        tool_calls = list(last.tool_calls)
+        result_messages: List[ToolMessage] = []
+        def _args_from_tc(tc: Any) -> dict:
+            raw = (tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)) or {}
+            if isinstance(raw, dict):
+                return raw
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    return {}
+            return {}
+
+        for tc in tool_calls:
+            name = (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)) or "unknown"
+            args = _args_from_tc(tc)
+            call_id = (tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)) or f"call_{len(result_messages)}"
+            tool = tools_by_name.get(name)
+            if not tool:
+                result_messages.append(
+                    ToolMessage(content=f"Error: unknown tool '{name}'. Try one of: {list(tools_by_name.keys())}", tool_call_id=call_id)
+                )
+                continue
+            try:
+                if asyncio.iscoroutinefunction(getattr(tool, "ainvoke", None)):
+                    out = await tool.ainvoke(args)
+                else:
+                    loop = asyncio.get_event_loop()
+                    out = await loop.run_in_executor(None, lambda a=args: tool.invoke(a))
+                content = out if isinstance(out, str) else str(out)
+                result_messages.append(ToolMessage(content=content, tool_call_id=call_id))
+            except Exception as e:
+                result_messages.append(
+                    ToolMessage(content=f"Error executing tool '{name}': {e}", tool_call_id=call_id)
+                )
+        return {"messages": result_messages}
+
+    return _sequential_tools_node
+
+
 # ============================================================================
 # JSON Response Parsing
 # ============================================================================
@@ -163,6 +227,17 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
         return None
 
     # Convert tool_calls to LangChain format, dropping invalid/unknown tools
+    def normalize_args(raw: Any) -> dict:
+        """Ensure args is a dict. Parse JSON string if needed."""
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str) and raw.strip():
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
     tool_calls = []
     for tc in tool_calls_data:
         raw_name = tc.get("name", "")
@@ -172,7 +247,7 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
             continue
         tool_calls.append({
             "name": name,
-            "args": tc.get("arguments", {}),
+            "args": normalize_args(tc.get("arguments")),
             "id": tc.get("id", f"call_{len(tool_calls)}"),
         })
 
@@ -318,12 +393,17 @@ def _is_approval_phrase(content: str) -> bool:
 
 def route_entry(state: AgentState) -> Literal["planner", "editor"]:
     """
-    Entry router: start at editor when user is approving an existing plan.
+    Entry router: start at editor when user is approving an existing plan OR when mode is explicitly "edit".
     
     If the last message is a user approval and the previous is an assistant message
     (the plan), go straight to editor so the agent uses tools instead of asking
-    "which plan?". Otherwise start at planner.
+    "which plan?". Also route to editor if initial mode is "edit".
+    Otherwise start at planner.
     """
+    # Check if mode is explicitly set to "edit" - skip planning and go straight to editor
+    if state.get("mode") == "edit":
+        return "editor"
+    
     messages = state["messages"]
     if len(messages) < 2:
         return "planner"
@@ -331,7 +411,7 @@ def route_entry(state: AgentState) -> Literal["planner", "editor"]:
     prev = messages[-2]
     if isinstance(last, HumanMessage) and isinstance(prev, AIMessage):
         content = (last.content or "").strip().lower()
-        if _is_approval_phrase(content) or state.get("mode") == "edit":
+        if _is_approval_phrase(content):
             return "editor"
     return "planner"
 
@@ -425,10 +505,9 @@ def create_agent_graph(
     workflow.add_node("planner", lambda state: planner_node(state, llm, registry, wr))
     workflow.add_node("editor", lambda state: editor_node(state, llm, registry, wr))
     
-    # Add tool node (permission layer applied in get_tools when available)
+    # Add tool node: execute tools in LLM order, one at a time (sequential)
     tools = get_tools(workspace_root=workspace_root)
-    tool_node = ToolNode(tools)
-    workflow.add_node("tools", tool_node)
+    workflow.add_node("tools", create_sequential_tool_node(tools))
     
     # Entry: when user said "proceed with your plan", go to editor; else planner
     workflow.set_entry_point("router")

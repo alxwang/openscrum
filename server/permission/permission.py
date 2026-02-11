@@ -247,6 +247,8 @@ class PermissionSystem:
         If rule says ask -> add to pending, call on_pending(request_info), then await until reply() is called.
         If rule says allow -> return.
         """
+        import logging
+        _log = logging.getLogger(__name__)
         ruleset = ruleset or []
         merged = merge_rulesets(ruleset, self._approved)
         metadata = metadata or {}
@@ -269,30 +271,61 @@ class PermissionSystem:
                     always=always,
                     tool=tool,
                 )
-                future: asyncio.Future = asyncio.get_event_loop().create_future()
+                loop = asyncio.get_running_loop()
+                future: asyncio.Future = loop.create_future()
+                _log.info("permission future created: request_id=%s future_id=%s loop=%s", 
+                         rid, id(future), id(loop))
 
                 def resolve():
+                    _log.info("permission resolve() called: request_id=%s future_done=%s", rid, future.done())
                     if not future.done():
-                        future.set_result(None)
+                        try:
+                            # Always use call_soon_threadsafe to ensure proper event loop scheduling
+                            # This is critical because reply() is sync but called from async endpoint
+                            loop.call_soon_threadsafe(future.set_result, None)
+                            _log.info("permission future.set_result scheduled: request_id=%s", rid)
+                        except Exception as e:
+                            _log.exception("permission resolve() failed to schedule future: request_id=%s error=%s", rid, e)
+                    else:
+                        _log.warning("permission resolve() called but future already done: request_id=%s", rid)
 
                 def reject(ex: BaseException):
+                    _log.info("permission reject() called: request_id=%s exception=%s", rid, type(ex).__name__)
                     if not future.done():
-                        future.set_exception(ex)
+                        try:
+                            # Always use call_soon_threadsafe for proper event loop scheduling
+                            loop.call_soon_threadsafe(future.set_exception, ex)
+                            _log.info("permission future.set_exception scheduled: request_id=%s", rid)
+                        except Exception as e:
+                            _log.exception("permission reject() failed to schedule future: request_id=%s error=%s", rid, e)
+                    else:
+                        _log.warning("permission reject() called but future already done: request_id=%s", rid)
 
                 self._pending[rid] = {"info": req, "resolve": resolve, "reject": reject}
+                _log.info("permission request created: request_id=%s session_id=%s permission=%s patterns=%s pending_count=%d", 
+                           rid, session_id, permission, patterns, len(self._pending))
                 if on_pending is not None:
                     try:
                         on_pending(req.to_dict())
-                    except Exception:
-                        pass
+                        _log.info("permission on_pending callback invoked: request_id=%s", rid)
+                    except Exception as e:
+                        _log.exception("permission on_pending callback failed: %s", e)
+                
+                # Await the future - this will block until resolve() or reject() is called
+                _log.info("permission awaiting future: request_id=%s future=%s done=%s", 
+                         rid, id(future), future.done())
                 try:
-                    await asyncio.wait_for(future, timeout=3600.0)
-                except asyncio.TimeoutError:
-                    self._pending.pop(rid, None)
-                    raise RejectedError("Permission request timed out.")
-                except Exception:
+                    await future  # Simpler: just await the future directly
+                    _log.info("permission future resolved successfully: request_id=%s", rid)
+                except Exception as e:
+                    _log.error("permission future raised exception: request_id=%s error=%s", rid, e)
                     self._pending.pop(rid, None)
                     raise
+                
+                # Clean up after successful resolution
+                self._pending.pop(rid, None)
+                _log.info("permission approved and cleaned up: request_id=%s remaining_pending=%d", 
+                         rid, len(self._pending))
                 return
         return
 
@@ -307,27 +340,45 @@ class PermissionSystem:
         once -> resolve and remove. always -> add to approved, resolve, auto-resolve matching.
         reject -> reject this (and optionally all for session).
         """
+        import logging
+        _log = logging.getLogger(__name__)
         pending = self._pending.get(request_id)
         if not pending:
+            _log.warning(
+                "permission reply for unknown request_id=%r (pending=%s). "
+                "If using multiple server workers, run with one worker so the stream and reply share the same process.",
+                request_id,
+                list(self._pending.keys()),
+            )
             return
         req = pending["info"]
         resolve_fn = pending["resolve"]
         reject_fn = pending["reject"]
         del self._pending[request_id]
+        _log.info("permission reply received: request_id=%r reply=%s permission=%s patterns=%s session=%s", 
+                   request_id, reply, req.permission, req.patterns, req.session_id)
 
         if reply == "reject":
+            _log.info("permission rejecting: request_id=%s", request_id)
             reject_fn(
                 CorrectedError(message) if message else RejectedError()
             )
             # Reject all other pending for same session
+            rejected_count = 0
             for rid, p in list(self._pending.items()):
                 if p["info"].session_id == req.session_id:
                     del self._pending[rid]
                     p["reject"](RejectedError())
+                    rejected_count += 1
+            if rejected_count > 0:
+                _log.info("permission rejected %d other pending requests for session %s", 
+                         rejected_count, req.session_id)
             return
 
         if reply == "once":
+            _log.info("permission resolving future for request_id=%s", request_id)
             resolve_fn()
+            _log.info("permission resolved once for request_id=%s", request_id)
             return
 
         if reply == "always":
@@ -336,7 +387,9 @@ class PermissionSystem:
                     PermissionRule(permission=req.permission, pattern=pattern, action="allow")
                 )
             self._save_approved()
+            _log.info("permission resolving future and saving rule for request_id=%s", request_id)
             resolve_fn()
+            _log.info("permission resolved always for request_id=%s, checking other pending", request_id)
             # Auto-resolve other pending for same session that are now covered
             for rid, p in list(self._pending.items()):
                 if p["info"].session_id != req.session_id:

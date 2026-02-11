@@ -101,7 +101,7 @@ fi
 if ! backend_up; then
   echo "Starting OpenScrum backend on port $PORT..."
   UVICORN_LOG="$(mktemp)"
-  python -m uvicorn server.main:app --host 127.0.0.1 --port "$PORT" >>"$UVICORN_LOG" 2>&1 &
+  python -m uvicorn server.main:app --host 127.0.0.1 --port "$PORT" --workers 1 >>"$UVICORN_LOG" 2>&1 &
   UVICORN_PID=$!
   for i in $(seq 1 30); do
     if backend_up; then

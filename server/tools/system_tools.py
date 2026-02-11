@@ -746,15 +746,18 @@ def apply_patch(patch_text: str = Field(..., description="The full patch text th
 
 
 @tool
-def todowrite(todos: List[Dict[str, Any]] = Field(..., description="The updated todo list")) -> str:
+def todowrite(todos: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="The updated todo list (array of objects with id, content, status)")) -> str:
     """
     Use this tool to create and manage a structured task list.
     
     Helps track progress, organize complex tasks, and demonstrate thoroughness.
+    Pass a list of todo items, e.g. [{"id": "1", "content": "Task description", "status": "pending"}].
     """
+    if not todos or not isinstance(todos, list):
+        return "Todo list empty or no todos provided. Pass a non-empty 'todos' array, e.g. [{\"id\": \"1\", \"content\": \"Task\", \"status\": \"pending\"}]."
     # In a real implementation, this would persist to a session store
     # For now, just return a summary
-    pending = [t for t in todos if t.get('status') != 'completed']
+    pending = [t for t in todos if isinstance(t, dict) and t.get("status") != "completed"]
     return f"Updated todo list: {len(pending)} pending, {len(todos) - len(pending)} completed"
 
 
