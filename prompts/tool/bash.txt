@@ -83,7 +83,12 @@ Important notes:
 - NEVER run additional commands to read or explore code, besides git bash commands
 - NEVER use the TodoWrite or Task tools
 - DO NOT push to the remote repository unless the user explicitly asks you to do so
-- IMPORTANT: Never use git commands with the -i flag (like git rebase -i or git add -i) since they require interactive input which is not supported.
+- **CRITICAL: Never use interactive commands** - The following commands will hang or fail because they require user input:
+  - Git: `git rebase -i`, `git add -i`, `git add -p`, `git commit` (without -m)
+  - NPM/Node: `npm init`, `npm create`, `npx create-*`, `yarn create`, `pnpm create` (without non-interactive flags)
+  - Project scaffolding: `vue create`, `ng new`, `create-react-app`, `rails new` (without --defaults/--skip-bundle flags)
+  - Package managers: Any command that asks "Do you want to continue? [Y/n]" - add `-y` or `--yes` flag
+  - **Always use non-interactive alternatives**: `npm init -y`, `npm create vite@latest -- --template vue`, or create files manually with Write tool
 - If there are no changes to commit (i.e., no untracked files and no modifications), do not create an empty commit
 
 # Creating pull requests

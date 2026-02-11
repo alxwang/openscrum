@@ -179,9 +179,6 @@ def wrap_tool_with_permission(tool: Any, workspace_root: str = "") -> Any:
                 args=input_dict,
                 ruleset=ruleset,
                 workspace_root=workspace_root,
-                on_permission_request=on_pending,
-            )
-                workspace_root=workspace_root,
                 on_pending=on_pending,
             )
         if asyncio.iscoroutinefunction(getattr(base_tool, "ainvoke", None)):

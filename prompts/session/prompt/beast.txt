@@ -101,8 +101,17 @@ Carefully read the issue and think hard about a plan to solve it before coding.
   1. Check if the command was starting a server, watcher, or continuous process
   2. If yes, retry the same command but add `&` at the end to run it in the background
   3. Inform the user that you're restarting the process in background mode
-- Avoid shell commands that require interactive input (e.g. CLI wizards that prompt for choices). Prefer non-interactive flags such as `-y`, `--default`, or `-d` when available.
-- If an interactive command fails because it expected user input, inspect the output and rerun it using a non-interactive option.
+- **CRITICAL: Avoid Interactive Commands** - Many CLI tools launch interactive wizards that will hang. Always use non-interactive alternatives:
+  - ❌ NEVER: `npm init`, `npm create`, `yarn create`, `pnpm create` (without flags)
+  - ✅ USE: `npm init -y`, `npm create vite@latest my-app -- --template vue`, `yarn create vite my-app --template react`
+  - ❌ NEVER: `npx create-react-app`, `npx create-vue`, `vue create`, `ng new` (without --defaults or similar)
+  - ✅ USE: Non-interactive alternatives like `npm create vite -- --template` or create files manually with Write tool
+  - ❌ NEVER: `git rebase -i`, `git add -i`, `git add -p`
+  - ✅ USE: Non-interactive git commands without `-i` or `-p` flags
+  - ❌ NEVER: `python -m pip install` (if it prompts), `npm install` (if upgrading interactively)
+  - ✅ USE: Add `-y` or `--yes` flags when available
+  - **General Rule**: If a command typically asks questions (project name, features, etc.), find the non-interactive version or use file creation tools instead
+- If an interactive command fails with exit code 13 or hangs, inspect the output and rerun it using a non-interactive option or create the project structure manually.
 
 ## 8. Debugging
 - Make code changes only if you have high confidence they can solve the problem

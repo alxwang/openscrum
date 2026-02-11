@@ -31,11 +31,17 @@ from textual.reactive import reactive
 
 class CopyableRichLog(RichLog):
     """RichLog that keeps a plain-text tail for copy and optionally appends to a workspace MD file."""
+    
+    # Enable mouse support and focus for terminal's native selection
+    can_focus = True
+    COMPONENT_CLASSES = {"richlog--highlight-key"}
 
     def __init__(self, *args, log_tail: Optional[deque] = None, **kwargs):
         super().__init__(*args, **kwargs)
         self._log_tail = log_tail
         self._log_file_path: Optional[Path] = None  # set by ChatWidget to workspace_root/openscrum-chat.md
+        # Allow terminal's native selection to work
+        self.auto_scroll = True
 
     def write(self, *args, **kwargs):
         super().write(*args, **kwargs)
@@ -48,6 +54,8 @@ class CopyableRichLog(RichLog):
             try:
                 with open(self._log_file_path, "a", encoding="utf-8") as f:
                     f.write(plain.rstrip() + "\n")
+                    f.flush()  # Flush immediately for debugging
+                    os.fsync(f.fileno())  # Ensure OS writes to disk
             except Exception:
                 pass
 
@@ -264,7 +272,7 @@ class ChatWidget(Container):
                 with Container(id="panel-left"):
                     yield CopyableRichLog(id="chat-log", markup=True, wrap=True, log_tail=self._log_tail)
                 with Container(id="panel-right"):
-                    yield RichLog(id="tool-output", markup=True, wrap=True)
+                    yield CopyableRichLog(id="tool-output", markup=True, wrap=True)
             
             with Horizontal(id="input-container"):
                 yield MessageInputWidget(
@@ -304,39 +312,53 @@ class ChatWidget(Container):
             pass
 
     def _clear_logs_on_start(self) -> None:
-        """Clear openscrum-chat.md, chat log, and tool output when TUI starts."""
+        """Clear chatbox.md and toolbox.md, chat log, and tool output when TUI starts."""
         root = (self.workspace_root or "").strip()
         if root:
-            path = Path(root) / "openscrum-chat.md"
-            if path.parent.exists():
+            chat_path = Path(root) / "chatbox.md"
+            tool_path = Path(root) / "toolbox.md"
+            if chat_path.parent.exists():
                 try:
-                    path.write_text("# OpenScrum Chat\n\n", encoding="utf-8")
+                    chat_path.write_text("# OpenScrum Chat\n\n", encoding="utf-8")
+                    tool_path.write_text("# OpenScrum Tool Output\n\n", encoding="utf-8")
                 except Exception:
                     pass
         self._log_tail.clear()
         try:
-            self.query_one("#chat-log", RichLog).clear()
+            chat_log = self.query_one("#chat-log", CopyableRichLog)
+            chat_log.clear()
         except Exception:
             pass
         try:
-            self.query_one("#tool-output", RichLog).clear()
+            self.query_one("#tool-output", CopyableRichLog).clear()
         except Exception:
             pass
 
     def _set_chat_log_file(self) -> None:
-        """Point chat log to workspace_root/openscrum-chat.md for easy access."""
+        """Point chat log to workspace_root/chatbox.md and tool output to toolbox.md."""
         root = (self.workspace_root or "").strip()
         if not root:
             return
-        path = Path(root) / "openscrum-chat.md"
-        if not path.is_file() and path.parent.exists():
+        chat_path = Path(root) / "chatbox.md"
+        tool_path = Path(root) / "toolbox.md"
+        if not chat_path.is_file() and chat_path.parent.exists():
             try:
-                path.write_text("# OpenScrum Chat\n\n", encoding="utf-8")
+                chat_path.write_text("# OpenScrum Chat\n\n", encoding="utf-8")
+            except Exception:
+                pass
+        if not tool_path.is_file() and tool_path.parent.exists():
+            try:
+                tool_path.write_text("# OpenScrum Tool Output\n\n", encoding="utf-8")
             except Exception:
                 pass
         try:
-            log_widget = self.query_one("#chat-log", CopyableRichLog)
-            log_widget._log_file_path = path
+            chat_widget = self.query_one("#chat-log", CopyableRichLog)
+            chat_widget._log_file_path = chat_path
+        except Exception:
+            pass
+        try:
+            tool_widget = self.query_one("#tool-output", CopyableRichLog)
+            tool_widget._log_file_path = tool_path
         except Exception:
             pass
     
@@ -347,7 +369,7 @@ class ChatWidget(Container):
         if not request_id:
             return None
         
-        chat_log = self.query_one("#chat-log", RichLog)
+        chat_log = self.query_one("#chat-log", CopyableRichLog)
         
         # Store permission info
         self._pending_permission = {
@@ -399,14 +421,14 @@ class ChatWidget(Container):
             session = response.json()
             self.session_id = session["id"]
             
-            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log = self.query_one("#chat-log", CopyableRichLog)
             chat_log.write(f"[dim]Session created: {self.session_id[:8]}...[/dim]")
             self._set_chat_log_file()
             self._update_footer_mode()
             await self._fetch_model()
         except Exception as e:
             # Fallback to stateless mode if sessions not available
-            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log = self.query_one("#chat-log", CopyableRichLog)
             chat_log.write(f"[dim]Note: Session management unavailable, using stateless mode[/dim]")
     
     async def _fetch_model(self) -> None:
@@ -454,7 +476,7 @@ class ChatWidget(Container):
     def _write_tool_output(self, text: str) -> None:
         """Append to the right-panel tool/terminal output (no markup)."""
         try:
-            self.query_one("#tool-output", RichLog).write(text)
+            self.query_one("#tool-output", CopyableRichLog).write(text)
         except Exception:
             pass
 
@@ -464,7 +486,7 @@ class ChatWidget(Container):
         self.mode = "edit" if self.mode == "plan" else "plan"
         self._update_footer_mode()
         self._update_hint_bar()
-        chat_log = self.query_one("#chat-log", RichLog)
+        chat_log = self.query_one("#chat-log", CopyableRichLog)
         label = "Plan (read-only)" if self.mode == "plan" else "Edit (with tools)"
         chat_log.write(f"[dim]Mode: [bold]{label}[/bold][/dim]")
 
@@ -478,7 +500,7 @@ class ChatWidget(Container):
         if not raw:
             # If there's a pending permission, treat empty Enter as approval (once)
             if self._pending_permission and self._permission_reply_event:
-                chat_log = self.query_one("#chat-log", RichLog)
+                chat_log = self.query_one("#chat-log", CopyableRichLog)
                 chat_log.write("✓ [green]Approved (once)[/green]")
                 self._permission_reply_value = "once"
                 self._permission_reply_event.set()
@@ -488,7 +510,7 @@ class ChatWidget(Container):
         input_widget.value = ""
         
         # Display user message
-        chat_log = self.query_one("#chat-log", RichLog)
+        chat_log = self.query_one("#chat-log", CopyableRichLog)
         chat_log.write(f"[bold green]You[/bold green]: {raw}")
         
         # Built-in commands start with / (OpenCode-style)
@@ -499,7 +521,7 @@ class ChatWidget(Container):
             command = "init"
             message = ""
         elif raw_lower == "/help":
-            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log = self.query_one("#chat-log", CopyableRichLog)
             chat_log.write(
                 "[dim]Commands: /init (create AGENTS.md), /help (this). "
                 "Tab=Plan/Edit, Enter=send, Ctrl+Enter=newline.[/dim]"
@@ -519,7 +541,7 @@ class ChatWidget(Container):
             message: User message to send
             command: Optional command (e.g. "init") for server to substitute prompt and run
         """
-        chat_log = self.query_one("#chat-log", RichLog)
+        chat_log = self.query_one("#chat-log", CopyableRichLog)
         
         try:
             self._set_status("Sending...")
@@ -810,11 +832,11 @@ class ChatWidget(Container):
     
     def action_clear(self) -> None:
         """Clear chat log and tool output panel."""
-        chat_log = self.query_one("#chat-log", RichLog)
+        chat_log = self.query_one("#chat-log", CopyableRichLog)
         chat_log.clear()
         self._log_tail.clear()
         try:
-            self.query_one("#tool-output", RichLog).clear()
+            self.query_one("#tool-output", CopyableRichLog).clear()
         except Exception:
             pass
         self._focus_input()
@@ -827,10 +849,10 @@ class ChatWidget(Container):
             self._focus_input()
             return
         if _set_clipboard(text):
-            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log = self.query_one("#chat-log", CopyableRichLog)
             chat_log.write("[dim]Copied to clipboard (Ctrl+Shift+C). Paste here or in another app with Ctrl+V.[/dim]")
         else:
-            chat_log = self.query_one("#chat-log", RichLog)
+            chat_log = self.query_one("#chat-log", CopyableRichLog)
             chat_log.write("[dim]Clipboard not available (install pbcopy on macOS or xclip/xsel on Linux).[/dim]")
         self._focus_input()
 
@@ -899,6 +921,10 @@ class OpenScrumApp(App):
         padding: 0;
         margin: 0;
         border: none;
+    }
+    
+    #chat-log:focus {
+        border: solid $accent;
     }
     
     #tool-output {
@@ -1003,7 +1029,7 @@ class OpenScrumApp(App):
         try:
             chat = self.query_one(ChatWidget)
             if chat._pending_permission and chat._permission_reply_event:
-                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log = chat.query_one("#chat-log", CopyableRichLog)
                 chat_log.write("✓ [green]Approved (once)[/green]")
                 chat._permission_reply_value = "once"
                 chat._permission_reply_event.set()
@@ -1015,7 +1041,7 @@ class OpenScrumApp(App):
         try:
             chat = self.query_one(ChatWidget)
             if chat._pending_permission and chat._permission_reply_event:
-                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log = chat.query_one("#chat-log", CopyableRichLog)
                 chat_log.write("✓ [green]Approved (always)[/green]")
                 chat._permission_reply_value = "always"
                 chat._permission_reply_event.set()
@@ -1027,7 +1053,7 @@ class OpenScrumApp(App):
         try:
             chat = self.query_one(ChatWidget)
             if chat._pending_permission and chat._permission_reply_event:
-                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log = chat.query_one("#chat-log", CopyableRichLog)
                 chat_log.write("✗ [red]Rejected[/red]")
                 chat._permission_reply_value = "reject"
                 chat._permission_reply_event.set()
@@ -1038,7 +1064,7 @@ class OpenScrumApp(App):
         """Test permission handling with fake request (Ctrl+T)."""
         try:
             chat = self.query_one(ChatWidget)
-            chat_log = chat.query_one("#chat-log", RichLog)
+            chat_log = chat.query_one("#chat-log", CopyableRichLog)
             
             # Simulate a permission request
             chat_log.write("")
@@ -1114,21 +1140,21 @@ class OpenScrumApp(App):
             if key == "o":
                 event.prevent_default()
                 event.stop()
-                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log = chat.query_one("#chat-log", CopyableRichLog)
                 chat_log.write("✓ [green]Approved (once)[/green]")
                 chat._permission_reply_value = "once"
                 chat._permission_reply_event.set()
             elif key == "a":
                 event.prevent_default()
                 event.stop()
-                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log = chat.query_one("#chat-log", CopyableRichLog)
                 chat_log.write("✓ [green]Approved (always)[/green]")
                 chat._permission_reply_value = "always"
                 chat._permission_reply_event.set()
             elif key == "r":
                 event.prevent_default()
                 event.stop()
-                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log = chat.query_one("#chat-log", CopyableRichLog)
                 chat_log.write("✗ [red]Rejected[/red]")
                 chat._permission_reply_value = "reject"
                 chat._permission_reply_event.set()
