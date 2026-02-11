@@ -294,7 +294,8 @@ def planner_node(
     ])
     
     # Call LLM (no tools in plan mode)
-    chain = prompt | llm
+    chain = prompt | llm.with_config({"run_name": "planner"})
+    
     response = chain.invoke({"messages": messages})
     
     # Parse JSON response
@@ -338,7 +339,7 @@ def editor_node(
 
     # Bind tools to LLM
     tools = get_tools()
-    llm_with_tools = llm.bind_tools(tools)
+    llm_with_tools = llm.bind_tools(tools).with_config({"run_name": "editor"})
     
     # Create prompt with system message
     prompt = ChatPromptTemplate.from_messages([

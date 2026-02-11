@@ -171,13 +171,16 @@ def wrap_tool_with_permission(tool: Any, workspace_root: str = "") -> Any:
             input_dict = {}
         ctx = get_tool_context()
         if ctx:
-            session_id, ruleset = ctx[0], ctx[1]
-            on_pending = ctx[2] if len(ctx) > 2 else None
+            session_id, workspace_root, ruleset = ctx[0], ctx[1], ctx[2]
+            on_pending = ctx[3] if len(ctx) > 3 else None
             await check_tool_permission(
                 session_id=session_id,
                 tool_name=name,
                 args=input_dict,
                 ruleset=ruleset,
+                workspace_root=workspace_root,
+                on_permission_request=on_pending,
+            )
                 workspace_root=workspace_root,
                 on_pending=on_pending,
             )

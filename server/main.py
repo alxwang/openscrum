@@ -5,6 +5,7 @@ Provides HTTP API for the agent with streaming support.
 Loads ~/.env for OPENAI_API_KEY, OPENAI_MODEL, etc. when present.
 """
 
+import asyncio
 import logging
 import os
 import json
@@ -18,6 +19,12 @@ try:
     env_path = Path.home() / ".env"
     if env_path.exists():
         load_dotenv(env_path)
+        # Configure LangSmith for LLM tracing
+        if os.getenv("LANGSMITH_KEY"):
+            os.environ["LANGCHAIN_TRACING_V2"] = "true"
+            os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGSMITH_KEY")
+            os.environ["LANGCHAIN_PROJECT"] = "openscrum"
+            os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
 except ImportError:
     pass
 
@@ -30,6 +37,12 @@ from langchain_anthropic import ChatAnthropic
 
 from server.agent.graph import create_agent, AgentState
 from server.agent.prompt_registry import PromptRegistry
+
+# Configure logging so our permission/tool logs are visible when running uvicorn
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 # Session management (ref: opencode server/routes/session.ts)
 try:
@@ -210,25 +223,12 @@ def get_agent(workspace_root: str = None) -> object:
     Get or create agent instance.
     
     Args:
-        workspace_root: Workspace root directory
+        workspace_root: Workspace root directory (now set via tool context per-session)
     
     Returns:
         Compiled agent graph
     """
     workspace = workspace_root or WORKSPACE_ROOT
-
-    # Ensure system tools use the same workspace root so all file and shell
-    # operations are confined to the configured workspace directory.
-    try:
-        from server.tools import system_tools as _system_tools
-    except ImportError:
-        try:
-            import tools.system_tools as _system_tools
-        except ImportError:
-            _system_tools = None
-    if _system_tools is not None:
-        _system_tools.WORKSPACE_ROOT = workspace
-
     llm = create_llm()
     return create_agent(llm, workspace_root=workspace)
 
@@ -241,6 +241,7 @@ async def stream_agent_response_with_save(
     agent: object,
     initial_state: AgentState,
     session_id: str,
+    workspace_root: str,
     user_message_id: str,
     session_permission_ruleset: list | None = None,
 ) -> AsyncIterator[str]:
@@ -251,6 +252,7 @@ async def stream_agent_response_with_save(
         agent: Compiled agent graph
         initial_state: Initial state for the agent
         session_id: Session ID to save messages to
+        workspace_root: Workspace root directory for this session
         user_message_id: User message ID (parent of assistant message)
         session_permission_ruleset: Optional permission rules for tool execution
     
@@ -279,6 +281,7 @@ async def stream_agent_response_with_save(
         _clear_ctx = clear_tool_context
         set_tool_context(
             session_id,
+            workspace_root,
             session_permission_ruleset or [],
             on_permission_request=lambda info: permission_queue.put_nowait(info),
         )
@@ -288,6 +291,7 @@ async def stream_agent_response_with_save(
             _clear_ctx = clear_tool_context
             set_tool_context(
                 session_id,
+                workspace_root,
                 session_permission_ruleset or [],
                 on_permission_request=lambda info: permission_queue.put_nowait(info),
             )
@@ -304,54 +308,66 @@ async def stream_agent_response_with_save(
         while True:
             agent_task = asyncio.create_task(agent_iter.__anext__())
             state_update = None
+            queue_task = None
             
             # Check for permission requests while waiting for agent step to complete
-            while True:
-                # First, drain all permission requests already in the queue (non-blocking)
-                drained_any = False
+            try:
                 while True:
-                    try:
-                        perm_info = permission_queue.get_nowait()
-                        drained_any = True
-                        _log.info("permission_request emitted (drained): id=%s", perm_info.get("id"))
+                    # First, drain all permission requests already in the queue (non-blocking)
+                    drained_any = False
+                    while True:
+                        try:
+                            perm_info = permission_queue.get_nowait()
+                            drained_any = True
+                            _log.info("permission_request emitted (drained): id=%s", perm_info.get("id"))
+                            yield f"data: {ChatChunk(type='permission_request', permission_request=perm_info).model_dump_json()}\n\n"
+                            # Yield control briefly to allow event loop to process any incoming replies
+                            await asyncio.sleep(0)
+                        except asyncio.QueueEmpty:
+                            break
+                    
+                    # After draining, wait for either agent to complete OR new permission request
+                    queue_task = asyncio.create_task(permission_queue.get())
+                    done, pending = await asyncio.wait(
+                        [agent_task, queue_task], return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    if agent_task in done:
+                        # Agent step completed - get result and cancel queue monitoring
+                        try:
+                            state_update = agent_task.result()
+                            _log.debug("agent step completed, state_update type: %s", type(state_update).__name__)
+                        except StopAsyncIteration:
+                            state_update = None
+                            _log.info("agent stream ended (graph finished)")
+                        except Exception as task_err:
+                            _log.exception("agent task failed: %s", task_err)
+                            raise
+                        # Cancel the queue_task since we're done with this step
+                        queue_task.cancel()
+                        try:
+                            await queue_task
+                        except asyncio.CancelledError:
+                            pass
+                        queue_task = None
+                        break  # Exit inner loop
+                    
+                    if queue_task in done:
+                        # New permission request arrived - emit it then loop back to drain more
+                        perm_info = queue_task.result()
+                        _log.info("permission_request emitted (queued): id=%s", perm_info.get("id"))
                         yield f"data: {ChatChunk(type='permission_request', permission_request=perm_info).model_dump_json()}\n\n"
-                        # Yield control briefly to allow event loop to process any incoming replies
-                        await asyncio.sleep(0)
-                    except asyncio.QueueEmpty:
-                        break
-                
-                # After draining, wait for either agent to complete OR new permission request
-                queue_task = asyncio.create_task(permission_queue.get())
-                done, pending = await asyncio.wait(
-                    [agent_task, queue_task], return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                if agent_task in done:
-                    # Agent step completed - get result and cancel queue monitoring
-                    try:
-                        state_update = agent_task.result()
-                        _log.debug("agent step completed, state_update type: %s", type(state_update).__name__)
-                    except StopAsyncIteration:
-                        state_update = None
-                        _log.info("agent stream ended (graph finished)")
-                    except Exception as task_err:
-                        _log.exception("agent task failed: %s", task_err)
-                        raise
-                    # Cancel the queue_task since we're done with this step
+                        queue_task = None
+                        # Loop back to drain any additional queued requests before waiting again
+                        continue
+            finally:
+                # Ensure queue_task is always cancelled if still pending
+                if queue_task and not queue_task.done():
                     queue_task.cancel()
                     try:
                         await queue_task
                     except asyncio.CancelledError:
                         pass
-                    break  # Exit inner loop
-                
-                if queue_task in done:
-                    # New permission request arrived - emit it then loop back to drain more
-                    perm_info = queue_task.result()
-                    _log.info("permission_request emitted (queued): id=%s", perm_info.get("id"))
-                    yield f"data: {ChatChunk(type='permission_request', permission_request=perm_info).model_dump_json()}\n\n"
-                    # Loop back to drain any additional queued requests before waiting again
-                    continue
             
             if state_update is None:
                 break
@@ -837,7 +853,7 @@ if SESSION_AVAILABLE:
 
                 # 8. Stream response and save assistant message (with permission context)
                 inner_stream = stream_agent_response_with_save(
-                    agent, initial_state, session_id, user_message_id,
+                    agent, initial_state, session_id, workspace_root, user_message_id,
                     session_permission_ruleset=session.get("permission") or [],
                 )
                 project_id = session.get("project_id", "default")
@@ -938,8 +954,11 @@ if PERMISSION_AVAILABLE:
             _log.info("POST /permissions/%s/reply completed successfully", request_id)
             
             # Give event loop time to process the scheduled future.set_result
-            await asyncio.sleep(0.01)
+            # Use multiple yields to ensure the future callback runs
+            for _ in range(5):
+                await asyncio.sleep(0)
             
+            _log.info("POST /permissions/%s/reply - future should be resolved now", request_id)
             return {"status": "ok", "request_id": request_id, "reply": body.reply}
         except Exception as e:
             _log.exception("POST /permissions/%s/reply failed: %s", request_id, e)

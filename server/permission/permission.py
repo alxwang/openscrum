@@ -280,12 +280,11 @@ class PermissionSystem:
                     _log.info("permission resolve() called: request_id=%s future_done=%s", rid, future.done())
                     if not future.done():
                         try:
-                            # Always use call_soon_threadsafe to ensure proper event loop scheduling
-                            # This is critical because reply() is sync but called from async endpoint
-                            loop.call_soon_threadsafe(future.set_result, None)
-                            _log.info("permission future.set_result scheduled: request_id=%s", rid)
+                            # Directly set result since we're in the same event loop
+                            future.set_result(None)
+                            _log.info("permission future.set_result called directly: request_id=%s", rid)
                         except Exception as e:
-                            _log.exception("permission resolve() failed to schedule future: request_id=%s error=%s", rid, e)
+                            _log.exception("permission resolve() failed to set future: request_id=%s error=%s", rid, e)
                     else:
                         _log.warning("permission resolve() called but future already done: request_id=%s", rid)
 
@@ -293,11 +292,11 @@ class PermissionSystem:
                     _log.info("permission reject() called: request_id=%s exception=%s", rid, type(ex).__name__)
                     if not future.done():
                         try:
-                            # Always use call_soon_threadsafe for proper event loop scheduling
-                            loop.call_soon_threadsafe(future.set_exception, ex)
-                            _log.info("permission future.set_exception scheduled: request_id=%s", rid)
+                            # Directly set exception since we're in the same event loop
+                            future.set_exception(ex)
+                            _log.info("permission future.set_exception called directly: request_id=%s", rid)
                         except Exception as e:
-                            _log.exception("permission reject() failed to schedule future: request_id=%s error=%s", rid, e)
+                            _log.exception("permission reject() failed to set future: request_id=%s error=%s", rid, e)
                     else:
                         _log.warning("permission reject() called but future already done: request_id=%s", rid)
 

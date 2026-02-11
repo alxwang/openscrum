@@ -11,7 +11,9 @@ import asyncio
 import json
 import os
 import re
+import signal
 import subprocess
+import threading
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -22,7 +24,6 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
 from textual.events import Key
 from textual.message import Message
-from textual.screen import ModalScreen
 from textual.widgets import Input, Button, RichLog, Header, Footer, Static
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -150,6 +151,8 @@ class MessageInputWidget(Input):
         # Let Ctrl+C always quit the app (Input would otherwise consume it)
         if key == "ctrl+c":
             self.app.exit()
+            # Force process exit after Textual cleanup using threading (works even when event loop is shutting down)
+            threading.Timer(0.2, lambda: os._exit(0)).start()
             event.prevent_default()
             return
         # Textual encodes modifiers in key string (e.g. ctrl+enter), not event.ctrl_key
@@ -170,15 +173,6 @@ class MessageInputWidget(Input):
         # Always handle editing keys ourselves so they work regardless of base Input's on_key
         pos = self.cursor_position
         n = len(self.value)
-        if key in ("backspace", "ctrl+h") and pos > 0:
-            self.value = self.value[: pos - 1] + self.value[pos:]
-            self.cursor_position = pos - 1
-            event.prevent_default()
-            return
-        if key == "delete" and pos < n:
-            self.value = self.value[:pos] + self.value[pos + 1 :]
-            event.prevent_default()
-            return
         if key == "left":
             self.cursor_position = max(0, pos - 1)
             event.prevent_default()
@@ -195,6 +189,19 @@ class MessageInputWidget(Input):
             self.cursor_position = n
             event.prevent_default()
             return
+        if key == "backspace":
+            if pos > 0:
+                self.value = self.value[:pos - 1] + self.value[pos:]
+                self.cursor_position = pos - 1
+            event.prevent_default()
+            event.stop()
+            return
+        if key == "delete":
+            if pos < n:
+                self.value = self.value[:pos] + self.value[pos + 1:]
+            event.prevent_default()
+            event.stop()
+            return
         # Typing: use parent's on_key if available, else insert character ourselves
         parent_on_key = getattr(super(), "on_key", None)
         if callable(parent_on_key):
@@ -210,46 +217,6 @@ class MessageInputWidget(Input):
 # ============================================================================
 # Permission confirmation dialog
 # ============================================================================
-
-
-class PermissionScreen(ModalScreen[str]):
-    """Modal to confirm or reject a tool permission (once / always / reject)."""
-
-    BINDINGS = [Binding("ctrl+c", "quit", "Quit")]
-
-    def __init__(self, request_id: str, permission: str, patterns: list, tool_name: str) -> None:
-        super().__init__()
-        self._request_id = request_id
-        self._permission = permission
-        self._patterns = patterns
-        self._tool_name = tool_name
-
-    def action_quit(self) -> None:
-        self.app.exit()
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static(
-                f"[bold]Permission: {self._permission}[/bold] ([dim]{self._tool_name}[/dim])\n"
-                f"Patterns: {self._patterns}\n\n"
-                "[dim]Tip: Use [Always] to allow all similar requests this session (e.g. multiple webfetch).[/dim]"
-            )
-            with Horizontal():
-                yield Button("Once", id="once", variant="primary")
-                yield Button("Always", id="always", variant="success")
-                yield Button("Reject", id="reject", variant="error")
-
-    @on(Button.Pressed, "#once")
-    def once(self) -> None:
-        self.dismiss("once")
-
-    @on(Button.Pressed, "#always")
-    def always(self) -> None:
-        self.dismiss("always")
-
-    @on(Button.Pressed, "#reject")
-    def reject(self) -> None:
-        self.dismiss("reject")
 
 
 # ============================================================================
@@ -283,6 +250,9 @@ class ChatWidget(Container):
         self.workspace_root: Optional[str] = None  # Current workspace
         self.model_name: str = ""  # From server /health
         self._log_tail: deque = deque(maxlen=100)  # plain-text tail for copy
+        self._pending_permission: Optional[dict] = None  # Current permission awaiting response
+        self._permission_reply_event: Optional[asyncio.Event] = None  # Signal when user responds
+        self._permission_reply_value: Optional[str] = None  # User's choice
     
     def compose(self) -> ComposeResult:
         """Create child widgets. Main area: left 1/3 messages, right 2/3 tool/terminal output."""
@@ -325,6 +295,13 @@ class ChatWidget(Container):
         self._update_hint_bar()
         asyncio.create_task(self._fetch_model())
         asyncio.create_task(self.ensure_session())
+    
+    async def on_unmount(self) -> None:
+        """Called when widget is unmounted - cleanup resources."""
+        try:
+            await self.client.aclose()
+        except Exception:
+            pass
 
     def _clear_logs_on_start(self) -> None:
         """Clear openscrum-chat.md, chat log, and tool output when TUI starts."""
@@ -366,17 +343,41 @@ class ChatWidget(Container):
     async def _ask_permission_reply(
         self, request_id: str, permission: str, patterns: list, tool_name: str
     ) -> Optional[str]:
-        """Show permission dialog and return user choice: once, always, or reject."""
+        """Show permission inline in chat and wait for keyboard input."""
         if not request_id:
             return None
+        
+        chat_log = self.query_one("#chat-log", RichLog)
+        
+        # Store permission info
+        self._pending_permission = {
+            "id": request_id,
+            "permission": permission,
+            "patterns": patterns,
+            "tool_name": tool_name,
+        }
+        self._permission_reply_event = asyncio.Event()
+        self._permission_reply_value = None
+        
+        # Blur input so it doesn't capture keys - don't focus anything specific
+        # so keys bubble up to App level
         try:
-            screen = PermissionScreen(request_id, permission, patterns, tool_name)
-            result = await self.app.push_screen(screen)
-            self._focus_input()
-            return result
+            input_widget = self.query_one("#message-input", Input)
+            input_widget.blur()
         except Exception:
-            self._focus_input()
-            return "once"  # Default allow once if dialog fails
+            pass
+        
+        # Wait for user to press a key
+        await self._permission_reply_event.wait()
+        
+        # Clear pending permission and restore focus to input
+        reply = self._permission_reply_value
+        self._pending_permission = None
+        self._permission_reply_event = None
+        self._permission_reply_value = None
+        self._focus_input()
+        
+        return reply
 
     async def ensure_session(self) -> None:
         """Ensure we have an active session, create one if needed."""
@@ -475,6 +476,12 @@ class ChatWidget(Container):
         raw = input_widget.value.strip()
         
         if not raw:
+            # If there's a pending permission, treat empty Enter as approval (once)
+            if self._pending_permission and self._permission_reply_event:
+                chat_log = self.query_one("#chat-log", RichLog)
+                chat_log.write("✓ [green]Approved (once)[/green]")
+                self._permission_reply_value = "once"
+                self._permission_reply_event.set()
             return
         
         # Clear input
@@ -665,10 +672,14 @@ class ChatWidget(Container):
                             patterns = perm.get("patterns", [])
                             metadata = perm.get("metadata") or {}
                             tool_name = metadata.get("tool", "?")
-                            chat_log.write(
-                                f"[yellow]Permission: [bold]{perm_name}[/bold] ({tool_name}) "
-                                f"for {patterns}[/yellow]"
-                            )
+                            
+                            # Show clear permission request in chat
+                            chat_log.write("")
+                            chat_log.write(f"[yellow]━━━ Permission Required ━━━[/yellow]")
+                            chat_log.write(f"[yellow]Tool: [bold]{tool_name}[/bold][/yellow]")
+                            chat_log.write(f"[yellow]Action: {perm_name}[/yellow]")
+                            for pattern in patterns:
+                                chat_log.write(f"[yellow]  • {pattern}[/yellow]")
                             # Also show effective working directory for the pending tool, when known.
                             try:
                                 workspace = (self.workspace_root or "").strip() or os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
@@ -691,23 +702,46 @@ class ChatWidget(Container):
                                 try:
                                     cmd = (metadata.get("args") or {}).get("command")
                                     if cmd:
-                                        chat_log.write(f"[dim]  command: {cmd}[/dim]")
+                                        chat_log.write(f"[yellow]  Command: [bold]{cmd}[/bold][/yellow]")
                                 except Exception:
                                     pass
+                            
+                            # Show prompt for user response
+                            chat_log.write(f"[green]✓ [O]nce[/green] | [green]✓ [A]lways[/green] | [red]✗ [R]eject[/red]")
+                            chat_log.write("")
+                            
                             reply = await self._ask_permission_reply(
                                 req_id, perm_name, patterns, tool_name
                             )
+                            # chat_log.write(f"[dim]DEBUG: User replied: {reply}[/dim]")
                             if reply and req_id:
                                 # Await the reply so the server gets it before we read more
                                 # (matches test script behaviour and avoids races).
                                 try:
+                                    # chat_log.write(f"[dim]DEBUG: Sending reply to server...[/dim]")
                                     await self.client.post(
                                         f"{self.server_url}/permissions/{req_id}/reply",
                                         json={"reply": reply},
                                         timeout=10.0,
                                     )
+                                    # chat_log.write(f"[dim]DEBUG: Reply sent successfully[/dim]")
                                     # Show we sent the reply and are waiting for tool to run (avoids looking stuck)
-                                    self._set_status(f"Running tool: {tool_name}...")
+                                    # For bash, show the full command in status line
+                                    if tool_name == "bash":
+                                        try:
+                                            cmd = (metadata.get("args") or {}).get("command", "")
+                                            if cmd:
+                                                # Truncate long commands to fit status bar
+                                                max_len = 80
+                                                if len(cmd) > max_len:
+                                                    cmd = cmd[:max_len-3] + "..."
+                                                self._set_status(f"Running: {cmd}")
+                                            else:
+                                                self._set_status(f"Running tool: {tool_name}...")
+                                        except Exception:
+                                            self._set_status(f"Running tool: {tool_name}...")
+                                    else:
+                                        self._set_status(f"Running tool: {tool_name}...")
                                 except Exception as e:
                                     chat_log.write(f"[red]Permission reply failed: {e}[/red]")
                                     self._set_status("Error")
@@ -722,16 +756,8 @@ class ChatWidget(Container):
                             tool_name = data.get("tool_name") or current_tool
                             
                             if tool_name:
-                                chat_log.write(
-                                    f"[green]✓ Tool [bold]{tool_name}[/bold] completed[/green]"
-                                )
+                                # Only show in tool output panel (right side), not in chat
                                 if tool_output:
-                                    # Left panel: short preview
-                                    output_preview = tool_output[:300]
-                                    if len(tool_output) > 300:
-                                        output_preview += f"\n... ({len(tool_output) - 300} more characters)"
-                                    chat_log.write(f"[dim]{output_preview}[/dim]")
-                                    # Right panel: full terminal output
                                     self._write_tool_output(tool_output if tool_output.endswith("\n") else tool_output + "\n")
                                     self._write_tool_output("[dim]--- done ---[/dim]\n")
                                 current_tool = None
@@ -851,8 +877,8 @@ class OpenScrumApp(App):
     }
     
     #panel-left {
-        width: 1fr;
-        min-width: 12;
+        width: 2fr;
+        min-width: 20;
         height: 100%;
         border: solid $primary;
         padding: 1;
@@ -860,8 +886,8 @@ class OpenScrumApp(App):
     }
     
     #panel-right {
-        width: 2fr;
-        min-width: 20;
+        width: 1fr;
+        min-width: 12;
         height: 100%;
         border: solid $primary;
         padding: 1;
@@ -873,6 +899,22 @@ class OpenScrumApp(App):
         padding: 0;
         margin: 0;
         border: none;
+    }
+    
+    #tool-output {
+        height: 1fr;
+        padding: 0;
+        margin: 0;
+        border: none;
+        text-style: dim;
+    }
+    
+    RichLog {
+        scrollbar-size: 1 1;
+    }
+    
+    #tool-output RichLog {
+        text-opacity: 70%;
     }
     
     #tool-output {
@@ -917,9 +959,13 @@ class OpenScrumApp(App):
     TITLE = "OpenScrum Agent"
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("ctrl+c", "quit", "Quit"),
+        Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("ctrl+shift+c", "copy_log", "Copy log"),
         Binding("ctrl+v", "paste", "Paste"),
+        Binding("ctrl+t", "test_permission", "Test Permission", show=False),
+        Binding("o", "permission_once", "", show=False, priority=True),
+        Binding("a", "permission_always", "", show=False, priority=True),
+        Binding("r", "permission_reject", "", show=False, priority=True),
     ]
 
     def __init__(self, server_url: str = SERVER_URL, *args, **kwargs):
@@ -933,6 +979,8 @@ class OpenScrumApp(App):
     def action_quit(self) -> None:
         """Quit the application."""
         self.exit()
+        # Force process exit using threading (works even when event loop is shutting down)
+        threading.Timer(0.2, lambda: os._exit(0)).start()
 
     def action_copy_log(self) -> None:
         """Copy chat log to clipboard (works from any focus)."""
@@ -947,6 +995,144 @@ class OpenScrumApp(App):
         try:
             chat = self.query_one(ChatWidget)
             chat.action_paste()
+        except Exception:
+            pass
+    
+    def action_permission_once(self) -> None:
+        """Handle O key for permission approval (once)."""
+        try:
+            chat = self.query_one(ChatWidget)
+            if chat._pending_permission and chat._permission_reply_event:
+                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log.write("✓ [green]Approved (once)[/green]")
+                chat._permission_reply_value = "once"
+                chat._permission_reply_event.set()
+        except Exception as e:
+            pass
+    
+    def action_permission_always(self) -> None:
+        """Handle A key for permission approval (always)."""
+        try:
+            chat = self.query_one(ChatWidget)
+            if chat._pending_permission and chat._permission_reply_event:
+                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log.write("✓ [green]Approved (always)[/green]")
+                chat._permission_reply_value = "always"
+                chat._permission_reply_event.set()
+        except Exception as e:
+            pass
+    
+    def action_permission_reject(self) -> None:
+        """Handle R key for permission rejection."""
+        try:
+            chat = self.query_one(ChatWidget)
+            if chat._pending_permission and chat._permission_reply_event:
+                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log.write("✗ [red]Rejected[/red]")
+                chat._permission_reply_value = "reject"
+                chat._permission_reply_event.set()
+        except Exception as e:
+            pass
+    
+    def action_test_permission(self) -> None:
+        """Test permission handling with fake request (Ctrl+T)."""
+        try:
+            chat = self.query_one(ChatWidget)
+            chat_log = chat.query_one("#chat-log", RichLog)
+            
+            # Simulate a permission request
+            chat_log.write("")
+            chat_log.write("[yellow]━━━ Permission Required (TEST) ━━━[/yellow]")
+            chat_log.write("[yellow]Tool: [bold]bash[/bold][/yellow]")
+            chat_log.write("[yellow]Action: bash[/yellow]")
+            chat_log.write("[yellow]  • test command[/yellow]")
+            chat_log.write("[yellow]  Command: [bold]echo 'test'[/bold][/yellow]")
+            chat_log.write("[green]✓ [O]nce[/green] | [green]✓ [A]lways[/green] | [red]✗ [R]eject[/red]")
+            chat_log.write("")
+            
+            # Set up fake permission state
+            import asyncio
+            test_id = "test_permission"
+            chat._pending_permission = {
+                "id": test_id,
+                "permission": "bash",
+                "patterns": ["test command"],
+                "tool_name": "bash",
+            }
+            chat._permission_reply_event = asyncio.Event()
+            chat._permission_reply_value = None
+            
+            # Set status
+            chat._set_status("[O]nce | [A]lways | [R]eject - TEST MODE")
+            
+            # Blur input and focus chat log
+            chat_log.focus()
+            
+            # Schedule cleanup after 30 seconds if no response
+            async def cleanup():
+                await asyncio.sleep(30)
+                # Only show timeout if permission is still pending with same test ID
+                if (chat._pending_permission and 
+                    chat._pending_permission.get("id") == test_id):
+                    chat_log.write("[dim]Test permission timed out[/dim]")
+                    chat._pending_permission = None
+                    chat._permission_reply_event = None
+                    chat._permission_reply_value = None
+                    chat._focus_input()
+                    chat._set_status("")
+            
+            asyncio.create_task(cleanup())
+            
+        except Exception as e:
+            pass
+    
+    def on_key(self, event: Key) -> None:
+        """Handle permission response keys at app level (highest priority)."""
+        key = (event.key or "").lower()
+        
+        # ALWAYS handle Ctrl+C first, before any other logic
+        if key == "ctrl+c":
+            event.prevent_default()
+            event.stop()
+            # Exit Textual to restore terminal, then force process exit
+            self.exit()
+            async def force_exit():
+                await asyncio.sleep(0.1)
+                os._exit(0)
+            asyncio.create_task(force_exit())
+            return
+        
+        try:
+            chat = self.query_one(ChatWidget)
+            
+            # Only handle permission keys if there's a pending permission
+            if not chat._pending_permission or not chat._permission_reply_event:
+                # No pending permission, let the event propagate normally
+                return
+            
+            # Check for permission response keys - only handle o, a, r
+            if key == "o":
+                event.prevent_default()
+                event.stop()
+                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log.write("✓ [green]Approved (once)[/green]")
+                chat._permission_reply_value = "once"
+                chat._permission_reply_event.set()
+            elif key == "a":
+                event.prevent_default()
+                event.stop()
+                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log.write("✓ [green]Approved (always)[/green]")
+                chat._permission_reply_value = "always"
+                chat._permission_reply_event.set()
+            elif key == "r":
+                event.prevent_default()
+                event.stop()
+                chat_log = chat.query_one("#chat-log", RichLog)
+                chat_log.write("✗ [red]Rejected[/red]")
+                chat._permission_reply_value = "reject"
+                chat._permission_reply_event.set()
+            # For any other key when permission is pending, let it propagate
         except Exception:
             pass
 

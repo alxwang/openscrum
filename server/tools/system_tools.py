@@ -18,8 +18,22 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 
-# Workspace root - should be set by the application
+# Workspace root - fallback default (should be set per-session via tool context)
 WORKSPACE_ROOT = os.getcwd()
+
+
+def get_workspace_root() -> str:
+    """Get the current workspace root from session context, or fall back to module default."""
+    try:
+        from server.tools.context import get_workspace_root_from_context
+    except ImportError:
+        try:
+            from tools.context import get_workspace_root_from_context
+        except ImportError:
+            return WORKSPACE_ROOT
+    
+    workspace_from_context = get_workspace_root_from_context()
+    return workspace_from_context if workspace_from_context else WORKSPACE_ROOT
 
 
 def resolve_path(file_path: str) -> Path:
@@ -27,24 +41,24 @@ def resolve_path(file_path: str) -> Path:
     if os.path.isabs(file_path):
         # If absolute, ensure it's within workspace
         abs_path = Path(file_path).resolve()
-        workspace = Path(WORKSPACE_ROOT).resolve()
+        workspace = Path(get_workspace_root()).resolve()
         try:
             abs_path.relative_to(workspace)
         except ValueError:
-            raise ValueError(f"Path {file_path} is outside workspace root {WORKSPACE_ROOT}")
+            raise ValueError(f"Path {file_path} is outside workspace root {get_workspace_root()}")
         return abs_path
     else:
         # Relative path - resolve from workspace root
-        return (Path(WORKSPACE_ROOT) / file_path).resolve()
+        return (Path(get_workspace_root()) / file_path).resolve()
 
 
 def ensure_in_workspace(path: Path) -> None:
     """Ensure a path is within the workspace root."""
-    workspace = Path(WORKSPACE_ROOT).resolve()
+    workspace = Path(get_workspace_root()).resolve()
     try:
         path.resolve().relative_to(workspace)
     except ValueError:
-        raise ValueError(f"Path {path} is outside workspace root {WORKSPACE_ROOT}")
+        raise ValueError(f"Path {path} is outside workspace root {get_workspace_root()}")
 
 
 # ============================================================================
@@ -110,7 +124,7 @@ def read(
             except ImportError:
                 system_paths = resolve_instructions_for_file = None
         if system_paths is not None and resolve_instructions_for_file is not None:
-            workspace = Path(WORKSPACE_ROOT).resolve()
+            workspace = Path(get_workspace_root()).resolve()
             exclude = set(system_paths(str(workspace)))
             extra = resolve_instructions_for_file(str(workspace), resolved_path, exclude_paths=exclude)
             if extra:
@@ -151,7 +165,7 @@ def write(
         with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(content)
         
-        relative_path = resolved_path.relative_to(Path(WORKSPACE_ROOT))
+        relative_path = resolved_path.relative_to(Path(get_workspace_root()))
         return f"Wrote file successfully: {relative_path}"
     
     except Exception as e:
@@ -206,7 +220,7 @@ def edit(
         with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
         
-        relative_path = resolved_path.relative_to(Path(WORKSPACE_ROOT))
+        relative_path = resolved_path.relative_to(Path(get_workspace_root()))
         return f"Edit applied successfully: {relative_path}"
     
     except Exception as e:
@@ -231,7 +245,7 @@ def grep(
     Returns file paths and line numbers with matches sorted by modification time.
     """
     try:
-        search_path = resolve_path(path) if path else Path(WORKSPACE_ROOT)
+        search_path = resolve_path(path) if path else Path(get_workspace_root())
         ensure_in_workspace(search_path)
         
         if not search_path.is_dir():
@@ -251,7 +265,7 @@ def grep(
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         for line_num, line in enumerate(f, start=1):
                             if re.search(pattern, line):
-                                rel_path = file_path.relative_to(Path(WORKSPACE_ROOT))
+                                rel_path = file_path.relative_to(Path(get_workspace_root()))
                                 matches.append({
                                     'path': str(rel_path),
                                     'line': line_num,
@@ -294,7 +308,7 @@ def glob(
     Returns matching file paths sorted by modification time.
     """
     try:
-        search_path = resolve_path(path) if path else Path(WORKSPACE_ROOT)
+        search_path = resolve_path(path) if path else Path(get_workspace_root())
         ensure_in_workspace(search_path)
         
         if not search_path.is_dir():
@@ -305,10 +319,10 @@ def glob(
         
         # Find matching files
         files = []
-        for file_path in Path(WORKSPACE_ROOT).rglob(pattern):
+        for file_path in Path(get_workspace_root()).rglob(pattern):
             if file_path.is_file():
                 try:
-                    rel_path = file_path.relative_to(Path(WORKSPACE_ROOT))
+                    rel_path = file_path.relative_to(Path(get_workspace_root()))
                     files.append({
                         'path': str(rel_path),
                         'mtime': file_path.stat().st_mtime
@@ -346,7 +360,7 @@ def list_files(
     You should generally prefer the Glob and Grep tools if you know which directories to search.
     """
     try:
-        list_path = resolve_path(path) if path else Path(WORKSPACE_ROOT)
+        list_path = resolve_path(path) if path else Path(get_workspace_root())
         ensure_in_workspace(list_path)
         
         if not list_path.is_dir():
@@ -366,7 +380,7 @@ def list_files(
         dirs = []
         
         for item in list_path.iterdir():
-            rel_path = item.relative_to(Path(WORKSPACE_ROOT))
+            rel_path = item.relative_to(Path(get_workspace_root()))
             rel_str = str(rel_path)
             
             # Check ignore patterns
@@ -388,7 +402,7 @@ def list_files(
         dirs.sort()
         files.sort()
         
-        output_lines = [f"{list_path.relative_to(Path(WORKSPACE_ROOT))}/"]
+        output_lines = [f"{list_path.relative_to(Path(get_workspace_root()))}/"]
         output_lines.extend(dirs)
         output_lines.extend(files)
         
@@ -439,7 +453,7 @@ def bash(
             if not cmd_dir.is_dir():
                 return f"Error: Working directory is not a directory: {workdir}"
         else:
-            cmd_dir = Path(WORKSPACE_ROOT)
+            cmd_dir = Path(get_workspace_root())
         
         # Detect background commands (trailing '&') and handle specially
         cmd_str = command.strip()
@@ -618,7 +632,7 @@ def multiedit(
         with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(content)
         
-        relative_path = resolved_path.relative_to(Path(WORKSPACE_ROOT))
+        relative_path = resolved_path.relative_to(Path(get_workspace_root()))
         return f"MultiEdit applied successfully: {len(edits)} edits to {relative_path}"
     
     except Exception as e:
