@@ -30,6 +30,7 @@ except ImportError:
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -113,6 +114,27 @@ DEFAULT_PROVIDER = os.getenv("OPENSCRUM_PROVIDER", "openai")  # "openai" or "ant
 
 app = FastAPI(title="OpenScrum Agent API", version="0.1.0")
 
+# CORS configuration so the web client (e.g. Vite on localhost:3000) can call the API
+allowed_origins = os.getenv("OPENSCRUM_CORS_ORIGINS")
+if allowed_origins:
+    origins = [o.strip() for o in allowed_origins.split(",") if o.strip()]
+else:
+    # Default to common local dev origins; can be overridden via env
+    origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ============================================================================
 # Request/Response Models
@@ -125,6 +147,14 @@ class ChatRequest(BaseModel):
     workspace_root: str = None  # Optional override
     session_id: str | None = None  # Optional session ID (creates new if not provided)
     command: str | None = None  # e.g. "init" -> substitute message with command prompt, mark project initialized on success
+
+
+class CreateSessionRequest(BaseModel):
+    """Create session request model."""
+    directory: str | None = None
+    workspace_name: str | None = None
+    title: str | None = None
+    parent_id: str | None = None
 
 
 class ChatChunk(BaseModel):
@@ -269,6 +299,7 @@ async def stream_agent_response_with_save(
     assistant_message_id = ascending("message")
     assistant_text_parts: list[str] = []
     tool_calls_saved: dict[str, dict] = {}  # call_id -> tool info
+    sent_content_length = 0  # Track how much content we've already sent
 
     # Set tool context so permission layer can ask for session-scoped permissions.
     # When a tool needs user confirmation, on_permission_request puts the request in a queue
@@ -452,12 +483,16 @@ async def stream_agent_response_with_save(
                     elif isinstance(message, AIMessage) and message.content:
                         content = str(message.content)
                         if not (hasattr(message, 'tool_calls') and message.tool_calls):
-                            assistant_text_parts.append(content)
-                            chunk_size = 50
-                            for i in range(0, len(content), chunk_size):
-                                chunk_text = content[i:i + chunk_size]
-                                chat_chunk = ChatChunk(type="token", content=chunk_text)
-                                yield f"data: {chat_chunk.model_dump_json()}\n\n"
+                            # Only stream the new content that hasn't been sent yet
+                            new_content = content[sent_content_length:]
+                            if new_content:
+                                assistant_text_parts.append(new_content)
+                                sent_content_length = len(content)
+                                chunk_size = 50
+                                for i in range(0, len(new_content), chunk_size):
+                                    chunk_text = new_content[i:i + chunk_size]
+                                    chat_chunk = ChatChunk(type="token", content=chunk_text)
+                                    yield f"data: {chat_chunk.model_dump_json()}\n\n"
         
         done_chunk = ChatChunk(type="done")
         yield f"data: {done_chunk.model_dump_json()}\n\n"
@@ -645,6 +680,11 @@ async def chat(request: ChatRequest):
 # ============================================================================
 
 if SESSION_AVAILABLE:
+    from server.workspace import get_workspace_manager, get_workspace_root
+    
+    # Initialize workspace root on startup
+    workspace_mgr = get_workspace_manager()
+    
     @app.get("/sessions", summary="List sessions")
     async def list_sessions(
         directory: str | None = None,
@@ -652,11 +692,45 @@ if SESSION_AVAILABLE:
         start: int | None = None,
         search: str | None = None,
         limit: int | None = None,
+        require_workspace: bool = True,
     ):
+        """
+        List sessions.
+        
+        Args:
+            directory: Filter by directory path
+            roots: Only return root sessions (no parent_id)
+            start: Filter by updated timestamp (only sessions updated after this)
+            search: Search in session titles
+            limit: Maximum number of sessions to return
+            require_workspace: If True, only return sessions that have corresponding workspace directories
+        
+        Returns:
+            List of session dictionaries
+        """
         session_svc = get_session()
-        return [dict(s) for s in session_svc.list(
-            directory=directory, roots_only=roots, start=start, search=search, limit=limit
-        )]
+        sessions = list(session_svc.list(
+            directory=directory, roots_only=roots, start=start, search=search, limit=None
+        ))
+        
+        # Filter to only sessions with existing workspaces if required
+        if require_workspace:
+            workspace_root = get_workspace_root()
+            filtered_sessions = []
+            for session in sessions:
+                session_id = session.get("id")
+                if session_id:
+                    # Check if workspace directory exists
+                    workspace_path = workspace_root / f"session_{session_id}"
+                    if workspace_path.exists() and workspace_path.is_dir():
+                        filtered_sessions.append(session)
+            sessions = filtered_sessions
+        
+        # Apply limit after filtering
+        if limit is not None:
+            sessions = sessions[:limit]
+        
+        return [dict(s) for s in sessions]
 
     @app.get("/sessions/status", summary="Get session statuses")
     async def session_status():
@@ -673,14 +747,64 @@ if SESSION_AVAILABLE:
             raise HTTPException(status_code=400, detail=str(e))
 
     @app.post("/sessions", summary="Create session")
-    async def create_session(
-        directory: str | None = None,
-        title: str | None = None,
-        parent_id: str | None = None,
-    ):
+    async def create_session(request: CreateSessionRequest):
+        """
+        Create a new session.
+        
+        Args:
+            request: CreateSessionRequest with:
+                - directory: Legacy parameter - if provided, workspace will be created at this path
+                            (for backward compatibility). If not provided, workspace will be created
+                            under ~/openscrum/workspaces/ directory.
+                - workspace_name: Optional workspace name (ignored, kept for compatibility).
+                                 Workspace folders always use session_SESSIONID format.
+                - title: Session title (required unless directory is provided for legacy mode).
+                        Used as project name.
+                - parent_id: Optional parent session ID
+        
+        Returns:
+            SessionInfo with workspace_root set to the workspace directory
+        
+        Raises:
+            HTTPException: If title is missing and not in legacy mode
+        """
         session_svc = get_session()
-        directory = directory or WORKSPACE_ROOT
-        return session_svc.create(directory=directory, title=title, parent_id=parent_id)
+        
+        # Extract fields from request
+        directory = request.directory
+        workspace_name = request.workspace_name
+        title = request.title
+        parent_id = request.parent_id
+        
+        # Log for debugging
+        _log = logging.getLogger(__name__)
+        _log.info(f"Creating session: title={title}, workspace_name={workspace_name}, directory={directory}")
+        
+        # If directory is explicitly provided, use it (legacy mode - title optional)
+        # Otherwise, title is required (new mode)
+        if directory:
+            # Legacy mode: use provided directory, title optional
+            session = session_svc.create(
+                directory=directory,
+                title=title,
+                parent_id=parent_id
+            )
+            return dict(session)
+        else:
+            # New mode: title is required (used as project name)
+            if not title:
+                raise HTTPException(
+                    status_code=400,
+                    detail="title is required when creating a new session (used as project name)"
+                )
+            # Use title as workspace_name for consistency (though workspace_name is ignored)
+            session = session_svc.create(
+                workspace_name=workspace_name or title,
+                title=title,
+                parent_id=parent_id
+            )
+            # Return as explicit dict so FastAPI serializes title correctly
+            return dict(session)
 
     @app.patch("/sessions/{session_id}", summary="Update session")
     async def update_session(session_id: str, title: str | None = None):
@@ -732,6 +856,221 @@ if SESSION_AVAILABLE:
             from storage import update_todos
         update_todos(session_id, todos)
         return todos
+    
+    @app.post("/sessions/{session_id}/compress", summary="Compress session context")
+    async def compress_session_context(session_id: str):
+        """
+        Compress session context by summarizing older messages.
+        Keeps recent messages and creates a summary of older ones.
+        """
+        try:
+            session_svc = get_session()
+            
+            # Get session to verify it exists
+            try:
+                session = session_svc.get(session_id)
+            except NotFoundError:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            
+            # Get all messages
+            messages = session_svc.messages(session_id=session_id)
+            if len(messages) <= 5:
+                return {"message": "Not enough messages to compress", "compressed": 0}
+            
+            # Keep last 5 messages, summarize the rest
+            recent_messages = messages[:5]  # Already newest first
+            old_messages = messages[5:]
+            
+            # Create summary text
+            summary_parts = []
+            for msg in reversed(old_messages):  # Chronological order for summary
+                info = msg.get("info", {})
+                role = info.get("role", "unknown")
+                parts = msg.get("parts", [])
+                text_parts = [p.get("text", "") for p in parts if p.get("type") == "text"]
+                if text_parts:
+                    content = " ".join(text_parts)[:200]  # Truncate long messages
+                    summary_parts.append(f"{role}: {content}...")
+            
+            summary_text = f"[Compressed {len(old_messages)} older messages]\n" + "\n".join(summary_parts[:10])
+            
+            # Delete old messages
+            for msg in old_messages:
+                msg_id = msg.get("info", {}).get("id")
+                if msg_id:
+                    try:
+                        session_svc.remove_message(msg_id)
+                    except Exception as e:
+                        _log = logging.getLogger(__name__)
+                        _log.warning(f"Failed to remove message {msg_id}: {e}")
+            
+            # Create a summary message
+            summary_msg_id = ascending("message")
+            now_ms = int(time.time() * 1000)
+            summary_message = {
+                "id": summary_msg_id,
+                "role": "assistant",
+                "session_id": session_id,
+                "time": {"created": now_ms},
+            }
+            session_svc.update_message(summary_message)
+            
+            # Save summary text part
+            text_part = {
+                "id": ascending("part"),
+                "type": "text",
+                "session_id": session_id,
+                "message_id": summary_msg_id,
+                "text": summary_text,
+            }
+            session_svc.update_part(text_part)
+            
+            return {
+                "message": f"Compressed {len(old_messages)} messages",
+                "compressed": len(old_messages),
+                "remaining": len(recent_messages) + 1  # +1 for summary
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            _log = logging.getLogger(__name__)
+            _log.error(f"Failed to compress context: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to compress context: {str(e)}")
+    
+    @app.post("/sessions/{session_id}/reset", summary="Reset session context")
+    async def reset_session_context(session_id: str):
+        """
+        Reset session context by deleting all messages.
+        This clears the entire conversation history.
+        """
+        try:
+            session_svc = get_session()
+            
+            # Get session to verify it exists
+            try:
+                session = session_svc.get(session_id)
+            except NotFoundError:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            
+            # Get all messages
+            messages = session_svc.messages(session_id=session_id)
+            
+            # Delete all messages
+            deleted_count = 0
+            for msg in messages:
+                msg_id = msg.get("info", {}).get("id")
+                if msg_id:
+                    try:
+                        session_svc.remove_message(msg_id)
+                        deleted_count += 1
+                    except Exception as e:
+                        _log = logging.getLogger(__name__)
+                        _log.warning(f"Failed to remove message {msg_id}: {e}")
+            
+            return {
+                "message": f"Reset context - deleted {deleted_count} messages",
+                "deleted": deleted_count
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            _log = logging.getLogger(__name__)
+            _log.error(f"Failed to reset context: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to reset context: {str(e)}")
+    
+    @app.get("/workspaces", summary="List all workspaces")
+    async def list_workspaces():
+        """
+        List all workspace directories under ~/openscrum/workspaces/.
+        Only returns workspaces that match the session_SESSIONID pattern.
+        """
+        workspaces = workspace_mgr.list_workspaces()
+        session_svc = get_session()
+        
+        # Enrich with session info if available
+        result = []
+        for workspace_path in workspaces:
+            # Extract session_id from folder name (session_SESSIONID)
+            if workspace_path.name.startswith("session_"):
+                session_id = workspace_path.name[8:]  # Remove "session_" prefix
+                session_info = None
+                try:
+                    session_info = session_svc.get(session_id)
+                except Exception:
+                    pass  # Session not found in storage, but workspace exists
+                
+                result.append({
+                    "path": str(workspace_path),
+                    "name": workspace_path.name,
+                    "session_id": session_id,
+                    "exists": workspace_path.exists(),
+                    "session": dict(session_info) if session_info else None,
+                })
+            else:
+                # Non-standard workspace folder
+                result.append({
+                    "path": str(workspace_path),
+                    "name": workspace_path.name,
+                    "session_id": None,
+                    "exists": workspace_path.exists(),
+                    "session": None,
+                })
+        
+        return result
+    
+    @app.get("/workspaces/root", summary="Get workspace root directory")
+    async def get_workspace_root_endpoint():
+        """Get the root directory where all workspaces are stored."""
+        return {
+            "workspace_root": str(get_workspace_root()),
+            "exists": get_workspace_root().exists(),
+        }
+    
+    @app.post("/workspaces/migrate", summary="Create workspace directories for existing sessions")
+    async def migrate_workspaces():
+        """
+        Create workspace directories for all existing sessions that don't have one.
+        This is useful for migrating old sessions to the new workspace structure.
+        """
+        session_svc = get_session()
+        workspace_root = get_workspace_root()
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        
+        all_sessions = list(session_svc.list())
+        created_count = 0
+        skipped_count = 0
+        
+        for session in all_sessions:
+            session_id = session.get("id")
+            if not session_id:
+                continue
+            
+            workspace_path = workspace_root / f"session_{session_id}"
+            
+            if workspace_path.exists():
+                skipped_count += 1
+                continue
+            
+            # Create workspace directory
+            workspace_path.mkdir(parents=True, exist_ok=True)
+            
+            # Update session directory field to point to new workspace
+            try:
+                session_svc.update(
+                    session_id,
+                    lambda d: d.update({"directory": str(workspace_path)}),
+                    touch=False
+                )
+                created_count += 1
+            except Exception as e:
+                # If update fails, workspace still created
+                created_count += 1
+        
+        return {
+            "created": created_count,
+            "skipped": skipped_count,
+            "total": len(all_sessions),
+        }
 
     @app.post("/sessions/{session_id}/message", summary="Send message to session")
     async def session_message(session_id: str, request: ChatRequest):

@@ -1,0 +1,128 @@
+/* Import highlight.js theme for syntax highlighting */
+@import 'highlight.js/styles/github-dark.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-text-primary font-sans antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+  
+  /* Dark mode support */
+  .dark-mode {
+    @apply bg-background-dark text-text-inverse;
+  }
+}
+
+@layer components {
+  /* Custom scrollbar */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-track {
+    @apply bg-surface;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-text-muted rounded-full;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-text-secondary;
+  }
+  
+  /* Code block styling */
+  .code-block {
+    @apply bg-surface-dark rounded-lg p-4 overflow-x-auto font-mono text-sm;
+  }
+  
+  /* Message bubble styling */
+  .message-user {
+    @apply bg-accent text-text-inverse rounded-2xl rounded-br-sm px-4 py-3 max-w-[80%] ml-auto;
+  }
+  
+  .message-agent {
+    @apply bg-surface rounded-2xl rounded-bl-sm px-4 py-3 max-w-[80%] mr-auto;
+  }
+  
+  .dark-mode .message-agent {
+    @apply bg-surface-dark;
+  }
+
+  /* Markdown content styling in agent messages */
+  .message-agent .prose {
+    @apply text-text-inverse;
+  }
+
+  .message-agent .prose h1,
+  .message-agent .prose h2,
+  .message-agent .prose h3,
+  .message-agent .prose h4,
+  .message-agent .prose h5,
+  .message-agent .prose h6 {
+    @apply text-text-inverse font-semibold mt-4 mb-2;
+  }
+
+  .message-agent .prose h1 { @apply text-2xl; }
+  .message-agent .prose h2 { @apply text-xl; }
+  .message-agent .prose h3 { @apply text-lg; }
+
+  .message-agent .prose p {
+    @apply mb-2 leading-relaxed;
+  }
+
+  .message-agent .prose code {
+    @apply bg-background-dark px-1.5 py-0.5 rounded text-sm font-mono;
+  }
+
+  .message-agent .prose pre {
+    @apply bg-background-dark rounded-lg p-4 overflow-x-auto my-3;
+  }
+
+  .message-agent .prose pre code {
+    @apply bg-transparent p-0;
+  }
+
+  .message-agent .prose ul,
+  .message-agent .prose ol {
+    @apply ml-4 mb-2;
+  }
+
+  .message-agent .prose li {
+    @apply mb-1;
+  }
+
+  .message-agent .prose a {
+    @apply text-accent hover:underline;
+  }
+
+  .message-agent .prose blockquote {
+    @apply border-l-4 border-text-muted pl-4 italic my-3;
+  }
+
+  .message-agent .prose table {
+    @apply w-full border-collapse my-3;
+  }
+
+  .message-agent .prose th,
+  .message-agent .prose td {
+    @apply border border-surface-dark px-3 py-2;
+  }
+
+  .message-agent .prose th {
+    @apply bg-surface-dark font-semibold;
+  }
+
+  .message-agent .prose strong {
+    @apply font-bold;
+  }
+
+  .message-agent .prose em {
+    @apply italic;
+  }
+}

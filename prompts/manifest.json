@@ -169,6 +169,11 @@
     "description": "System reminder prompt for plan mode (read-only phase)",
     "variables": []
   },
+  "EXECUTION_PROGRESS_SYSTEM_REMINDER": {
+    "path": "prompts/session/prompt/execution-progress.txt",
+    "description": "System reminder prompt for execution mode with progress reporting",
+    "variables": []
+  },
   "PLAN_REMINDER_ANTHROPIC_SYSTEM": {
     "path": "prompts/session/prompt/plan-reminder-anthropic.txt",
     "description": "System reminder prompt for plan mode (Anthropic-specific)",

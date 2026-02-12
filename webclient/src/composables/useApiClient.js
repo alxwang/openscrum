@@ -1,0 +1,238 @@
+import { ref } from 'vue'
+import axios from 'axios'
+
+// Use relative /api by default so Vite dev proxy can handle CORS in development.
+// In production, set VITE_API_URL to the full backend URL.
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
+const STORAGE_KEY = 'openscrum_session_id'
+
+const sessionId = ref(null)
+const modelName = ref('')
+
+// Load session ID from localStorage
+function loadSessionId() {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored) {
+      sessionId.value = stored
+    }
+  }
+}
+
+// Save session ID to localStorage
+function saveSessionId(id) {
+  if (typeof window !== 'undefined') {
+    if (id) {
+      localStorage.setItem(STORAGE_KEY, id)
+    } else {
+      localStorage.removeItem(STORAGE_KEY)
+    }
+  }
+}
+
+// Initialize from localStorage
+loadSessionId()
+
+export function useApiClient() {
+  const client = axios.create({
+    baseURL: API_BASE_URL,
+    timeout: 300000, // 5 minutes for long operations
+  })
+
+  const health = async () => {
+    try {
+      const response = await client.get('/health')
+      modelName.value = response.data.model || 'unknown'
+      return response.data
+    } catch (error) {
+      console.error('Health check failed:', error)
+      throw error
+    }
+  }
+
+  const listSessions = async (params = {}) => {
+    try {
+      const response = await client.get('/sessions', { params })
+      return response.data
+    } catch (error) {
+      console.error('Failed to list sessions:', error)
+      return []
+    }
+  }
+
+  const getSession = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to get session:', error)
+      throw error
+    }
+  }
+
+  const createSession = async (workspaceName = null, title = null) => {
+    try {
+      // Title is required - use provided title or fallback to workspaceName
+      const sessionTitle = title || workspaceName
+      if (!sessionTitle) {
+        throw new Error('Session title is required')
+      }
+      
+      const data = {
+        title: sessionTitle,
+      }
+      
+      // workspace_name is kept for API compatibility but ignored by server
+      if (workspaceName) {
+        data.workspace_name = workspaceName
+      }
+      
+      const response = await client.post('/sessions', data, {
+        headers: { 'Content-Type': 'application/json' },
+      })
+      
+      const newSessionId = response.data.id
+      sessionId.value = newSessionId
+      saveSessionId(newSessionId)
+      return response.data
+    } catch (error) {
+      console.error('Failed to create session:', error)
+      if (error.response) {
+        console.error('Response data:', error.response.data)
+      }
+      sessionId.value = null
+      saveSessionId(null)
+      throw error
+    }
+  }
+
+  const setSession = (id) => {
+    sessionId.value = id
+    saveSessionId(id)
+  }
+
+  const clearSession = () => {
+    sessionId.value = null
+    saveSessionId(null)
+  }
+
+  const sendMessage = async (message, mode = 'plan', onChunk = null) => {
+    const requestData = {
+      message,
+      mode,
+    }
+
+    let endpoint
+    if (sessionId.value) {
+      endpoint = `/sessions/${sessionId.value}/message`
+    } else {
+      endpoint = '/chat'
+      // For stateless mode, use current directory as workspace
+      requestData.workspace_root = window.location.pathname || process.cwd()
+    }
+
+    try {
+      // Use relative path - fetch resolves against current origin; avoid new URL() with /api base
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestData),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`HTTP ${response.status}: ${errorText}`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || '' // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (onChunk) {
+                await onChunk(data)
+              }
+            } catch (e) {
+              console.error('Failed to parse SSE chunk:', e, line)
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error sending message:', error)
+      throw error
+    }
+  }
+
+  const getSessionMessages = async (id, limit = null) => {
+    try {
+      const params = limit ? { limit } : {}
+      const response = await client.get(`/sessions/${id}/messages`, { params })
+      return response.data
+    } catch (error) {
+      console.error('Failed to get session messages:', error)
+      throw error
+    }
+  }
+
+  const compressContext = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/compress`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to compress context:', error)
+      throw error
+    }
+  }
+
+  const resetContext = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/reset`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to reset context:', error)
+      throw error
+    }
+  }
+
+  const replyToPermission = async (requestId, reply) => {
+    try {
+      const response = await client.post(`/permissions/${requestId}/reply`, {
+        reply,
+      })
+      return response.data
+    } catch (error) {
+      console.error('Failed to reply to permission:', error)
+      throw error
+    }
+  }
+
+  return {
+    health,
+    listSessions,
+    getSession,
+    getSessionMessages,
+    createSession,
+    setSession,
+    clearSession,
+    sendMessage,
+    replyToPermission,
+    compressContext,
+    resetContext,
+    sessionId,
+    modelName,
+  }
+}

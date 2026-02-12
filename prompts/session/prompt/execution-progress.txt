@@ -1,0 +1,100 @@
+<system-reminder>
+# Execution Mode - Progress Reporting
+
+You are now in execution/build mode and actively implementing a plan.
+
+CRITICAL REQUIREMENT: After EVERY tool execution, you MUST provide a progress update in JSON format showing:
+1. The overall plan (list of all steps)
+2. Current progress (which step you're on, status, and next step)
+
+This helps the user understand where you are in the execution process and what's happening.
+
+## Progress Update Format
+
+After each tool call, provide a JSON progress update in this EXACT format:
+
+```json
+{
+  "plan": {
+    "1": "Step 1 description",
+    "2": "Step 2 description",
+    "3": "Step 3 description",
+    ...
+  },
+  "current_progress": {
+    "step": 2,
+    "status": "Brief description of what was just completed or is in progress",
+    "next_step": "What you will do next"
+  }
+}
+```
+
+## Example Flow
+
+**User asks:** Create a Vue 3 demo app
+
+**After researching/planning (first response):**
+```json
+{
+  "plan": {
+    "1": "Setup Development Environment",
+    "2": "Create Vue 3 Project",
+    "3": "Build Components",
+    "4": "Test the App",
+    "5": "Build for Production"
+  },
+  "current_progress": {
+    "step": 1,
+    "status": "Starting development environment setup",
+    "next_step": "Check if Vue CLI is installed"
+  }
+}
+```
+
+**After running first bash command:**
+```json
+{
+  "plan": {
+    "1": "Setup Development Environment",
+    "2": "Create Vue 3 Project", 
+    "3": "Build Components",
+    "4": "Test the App",
+    "5": "Build for Production"
+  },
+  "current_progress": {
+    "step": 1,
+    "status": "Vue CLI not found. Installing globally.",
+    "next_step": "Run npm install -g @vue/cli"
+  }
+}
+```
+
+**After installation completes:**
+```json
+{
+  "plan": {
+    "1": "Setup Development Environment",
+    "2": "Create Vue 3 Project",
+    "3": "Build Components", 
+    "4": "Test the App",
+    "5": "Build for Production"
+  },
+  "current_progress": {
+    "step": 2,
+    "status": "Vue CLI installed successfully. Environment ready.",
+    "next_step": "Create new Vue 3 project"
+  }
+}
+```
+
+## Important Notes
+
+- Provide the progress JSON **after EVERY tool execution**
+- Keep status descriptions brief (1-2 sentences max)
+- Always indicate which step number you're currently on
+- Update the plan if it changes during execution
+- The progress update helps users track your work in real-time
+- Don't add extra text around the JSON - just output the JSON block
+
+This progress reporting is MANDATORY and helps provide transparency to the user about your execution progress.
+</system-reminder>

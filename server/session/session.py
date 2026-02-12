@@ -14,6 +14,7 @@ from server.storage.storage import Storage, get_storage, NotFoundError
 from server.session.id_util import descending, ascending, validate_session_id, validate_message_id
 from server.session.status import SessionStatus
 from server.session.message import MessageInfo, MessagePart, message_from_dict, message_to_dict
+from server.workspace import create_workspace_for_session, resolve_workspace_path
 
 # Default project when no project/instance is set (opencode uses Instance.project.id)
 DEFAULT_PROJECT_ID = "default"
@@ -109,23 +110,52 @@ class Session:
     def create(
         self,
         *,
-        directory: str,
+        directory: Optional[str] = None,
+        workspace_name: Optional[str] = None,
         parent_id: Optional[str] = None,
         title: Optional[str] = None,
         permission: Optional[dict] = None,
         id: Optional[str] = None,
     ) -> SessionInfo:
-        """Create a new session. Ref: Session.createNext."""
+        """
+        Create a new session. Ref: Session.createNext.
+        
+        Args:
+            directory: Legacy parameter - if provided, will be used as-is (for backward compatibility)
+            workspace_name: Optional workspace name (ignored, kept for compatibility)
+            parent_id: Optional parent session ID
+            title: Session title (required unless directory is provided for legacy mode)
+            permission: Optional permission ruleset
+            id: Optional session ID (auto-generated if not provided)
+        
+        Returns:
+            SessionInfo for the created session
+        """
         now = int(time.time() * 1000)
         sid = id or descending("session")
+        
+        # Determine workspace directory
+        if directory:
+            # Legacy mode: use provided directory as-is (for backward compatibility)
+            # Title is optional in legacy mode
+            workspace_dir = directory
+            session_title = title or self._default_title(bool(parent_id))
+        else:
+            # New mode: create workspace under ~/openscrum/workspaces/session_SESSIONID
+            # Title is required in new mode (enforced by API endpoint)
+            workspace_path = create_workspace_for_session(sid, workspace_name)
+            workspace_dir = str(workspace_path)
+            # Title should be provided, but fallback to default if somehow missing
+            session_title = title or self._default_title(bool(parent_id))
+        
         info = {
             "id": sid,
             "slug": _make_slug(),
             "version": VERSION,
             "project_id": DEFAULT_PROJECT_ID,
-            "directory": directory,
+            "directory": workspace_dir,
             "parent_id": parent_id,
-            "title": title or self._default_title(bool(parent_id)),
+            "title": session_title,
             "permission": permission,
             "time": {"created": now, "updated": now},
         }
@@ -230,7 +260,8 @@ class Session:
         """Fork session at optional message; copy messages (and parts) into new session. Ref: Session.fork."""
         original = self.get(session_id)
         title = self._forked_title(original["title"])
-        new_session = self.create(directory=original["directory"], title=title)
+        # Fork inherits the same workspace directory
+        new_session = self.create(directory=original["directory"], title=title, parent_id=session_id)
         id_map: dict[str, str] = {}
         for msg_with_parts in self.messages(session_id=session_id):
             msg_info = msg_with_parts["info"]

@@ -205,7 +205,19 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
     Returns:
         AIMessage with content and tool_calls extracted from JSON
     """
+    # Extract content - if not present, serialize the entire JSON as a string
     content = json_data.get("content", "")
+    
+    # Ensure content is always a string, never a dict
+    if isinstance(content, dict):
+        content = json.dumps(content, indent=2)
+    elif not content and json_data:
+        # If no content field but we have other data (e.g., steps), serialize it
+        content = json.dumps(json_data, indent=2)
+    elif not isinstance(content, str):
+        # Fallback: convert any other type to string
+        content = str(content)
+    
     tool_calls_data = json_data.get("tool_calls", [])
 
     # Helper to normalize/validate tool names against our registry
@@ -303,11 +315,18 @@ def planner_node(
     json_data = parse_json_response(content)
     parsed_response = create_ai_message_from_json(json_data, response)
     
+    # Extract content for scratchpad - ensure it's a string
+    scratchpad_content = json_data.get('content', '')
+    if isinstance(scratchpad_content, dict):
+        scratchpad_content = json.dumps(scratchpad_content)
+    else:
+        scratchpad_content = str(scratchpad_content)
+    
     # Update state
     return {
         "messages": [parsed_response],
         "mode": "plan",
-        "scratchpad": state.get("scratchpad", "") + f"\n[PLAN] {json_data.get('content', '')[:200]}...",
+        "scratchpad": state.get("scratchpad", "") + f"\n[PLAN] {scratchpad_content[:200]}...",
     }
 
 
@@ -323,10 +342,16 @@ def editor_node(
     Uses BEAST_PROVIDER_SYSTEM prompt (or similar) and has access to all tools.
     All responses are parsed as JSON.
     AGENTS.md / CLAUDE.md (project + global) are appended to system prompt.
+    Includes execution progress reporting instructions.
     """
     # Get editor mode prompt with context injection and JSON enforcement
     # Using BEAST_PROVIDER_SYSTEM as the main system prompt for edit mode
     system_prompt = registry.get_prompt("BEAST_PROVIDER_SYSTEM", force_json=True)
+    
+    # Add execution progress reporting instructions
+    execution_progress_prompt = registry.get_prompt("EXECUTION_PROGRESS_SYSTEM_REMINDER", force_json=False)
+    system_prompt = system_prompt.rstrip() + "\n\n" + execution_progress_prompt
+    
     if workspace_root:
         parts = instruction_system(workspace_root)
         if parts:
