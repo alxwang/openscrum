@@ -1,11 +1,16 @@
 <template>
-  <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="$emit('close')">
+  <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="handleClose">
     <div class="bg-background-dark rounded-lg p-6 w-full max-w-2xl max-h-[80vh] flex flex-col border border-surface-dark">
       <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-semibold text-text-inverse">Select or Create Session</h2>
+        <div>
+          <h2 class="text-xl font-semibold text-text-inverse">Select or Create Session</h2>
+          <p v-if="!canClose" class="text-sm text-yellow-400 mt-1">You must create or select a session to continue</p>
+        </div>
         <button
-          @click="$emit('close')"
+          v-if="canClose"
+          @click="handleClose"
           class="text-text-muted hover:text-text-inverse transition-colors"
+          title="Close"
         >
           <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -73,6 +78,13 @@
 import { ref, onMounted } from 'vue'
 import { useApiClient } from '../composables/useApiClient'
 
+const props = defineProps({
+  canClose: {
+    type: Boolean,
+    default: false
+  }
+})
+
 const emit = defineEmits(['select', 'create', 'close'])
 
 const { listSessions, createSession } = useApiClient()
@@ -81,6 +93,12 @@ const sessions = ref([])
 const isLoading = ref(true)
 const newSessionName = ref('')
 const isCreating = ref(false)
+
+const handleClose = () => {
+  if (props.canClose) {
+    emit('close')
+  }
+}
 
 const formatDate = (timestamp) => {
   if (!timestamp) return 'Unknown'

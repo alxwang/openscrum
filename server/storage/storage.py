@@ -113,8 +113,29 @@ _default_storage: Storage | None = None
 
 
 def get_storage(base_dir: str | None = None) -> Storage:
-    """Return default storage instance; create with optional base_dir if not set."""
+    """
+    Return default storage instance; create with optional base_dir if not set.
+    
+    If OPENSCRUM_STORAGE_BACKEND=memsearch, returns MemSearchAdapter for semantic search.
+    Otherwise returns standard file-based Storage.
+    """
     global _default_storage
     if _default_storage is None:
-        _default_storage = Storage(base_dir=base_dir)
+        # Check if memsearch backend is requested
+        backend = os.environ.get("OPENSCRUM_STORAGE_BACKEND", "file")
+        
+        if backend == "memsearch":
+            try:
+                from server.storage.memsearch_adapter import MemSearchAdapter
+                _default_storage = MemSearchAdapter(base_dir=base_dir)
+            except ImportError:
+                import logging
+                logging.warning(
+                    "OPENSCRUM_STORAGE_BACKEND=memsearch but memsearch_adapter not available. "
+                    "Using standard file storage. Install: pip install memsearch"
+                )
+                _default_storage = Storage(base_dir=base_dir)
+        else:
+            _default_storage = Storage(base_dir=base_dir)
+    
     return _default_storage

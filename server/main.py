@@ -104,7 +104,7 @@ except ImportError:
 
 WORKSPACE_ROOT = os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
 # Prefer OPENAI_MODEL from ~/.env when using OpenAI; fall back to OPENSCRUM_MODEL
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL") or os.getenv("OPENSCRUM_MODEL", "gpt-4")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL") or os.getenv("OPENSCRUM_MODEL", "gpt-5-mini")
 DEFAULT_PROVIDER = os.getenv("OPENSCRUM_PROVIDER", "openai")  # "openai" or "anthropic"
 
 
@@ -217,7 +217,7 @@ def create_llm(provider: str = None, model: str = None) -> object:
         model = os.getenv("OPENSCRUM_MODEL", "claude-3-5-sonnet-20241022")
     elif provider == "anthropic" and not anthropic_key and openai_key:
         provider = "openai"
-        model = os.getenv("OPENAI_MODEL") or os.getenv("OPENSCRUM_MODEL", "gpt-4")
+        model = os.getenv("OPENAI_MODEL") or os.getenv("OPENSCRUM_MODEL", "gpt-5-mini")
 
     if provider == "openai" and not openai_key:
         raise ValueError(
@@ -1131,15 +1131,72 @@ if SESSION_AVAILABLE:
                 # 6. Convert previous messages to LangChain format
                 langchain_messages = messages_to_langchain(previous_messages)
                 
+                # 6.5. RECALL - Search semantic memory for relevant context (memsearch integration)
+                _log = logging.getLogger(__name__)
+                memory_context = None
+                storage = get_storage()
+                
+                # Debug: check memsearch status
+                has_search = hasattr(storage, 'search')
+                has_enabled = hasattr(storage, '_memsearch_enabled')
+                is_enabled = getattr(storage, '_memsearch_enabled', False)
+                storage_backend = os.getenv('OPENSCRUM_STORAGE_BACKEND')
+                _log.info(f"Memory check: has_search={has_search}, has_enabled={has_enabled}, is_enabled={is_enabled}, backend={storage_backend}, storage_type={type(storage).__name__}")
+                
+                if has_search and has_enabled and is_enabled:
+                    try:
+                        # Search for memories relevant to original user question (not substituted command prompts)
+                        # Configurable minimum relevance threshold (default 0.3)
+                        MIN_RELEVANCE = float(os.getenv('OPENSCRUM_MEMSEARCH_MIN_RELEVANCE', '0.3'))
+                        
+                        all_memories = await storage.search(request.message, top_k=5, session_id=session_id)  # type: ignore
+                        # Filter out low-relevance memories (likely noise)
+                        memories = [m for m in all_memories if m.get('score', 0) >= MIN_RELEVANCE]
+                        
+                        if len(all_memories) > len(memories):
+                            _log.info(f"Filtered out {len(all_memories) - len(memories)} low-relevance memories (threshold: {MIN_RELEVANCE})")
+                        
+                        if memories:
+                            memory_lines = [
+                                "CONTEXT FROM MEMORY:",
+                                "Below are relevant excerpts from past conversations. Use them to maintain continuity and context, but prioritize information from the current conversation.\n",
+                                "## Relevant memories from past conversations:\n"
+                            ]
+                            for i, mem in enumerate(memories, 1):
+                                content = mem.get('content', '')[:500]  # Show more context per memory
+                                score = mem.get('score', 0)
+                                memory_lines.append(f"{i}. [Relevance: {score:.2f}]\n{content}\n")
+                            
+                            memory_context = "\n".join(memory_lines)
+                            scores_str = ', '.join([f"{m.get('score', 0):.2f}" for m in memories])
+                            _log.info(f"Injecting {len(memories)} high-relevance memories (scores: {scores_str})")
+                        else:
+                            _log.info(f"No memories above relevance threshold {MIN_RELEVANCE}")
+                    except Exception as e:
+                        _log.warning(f"Memory search failed: {e}")
+                else:
+                    if not has_search:
+                        _log.info("Memory search disabled: storage doesn't have search method")
+                    elif not has_enabled:
+                        _log.info("Memory search disabled: storage doesn't have _memsearch_enabled attribute")
+                    elif not is_enabled:
+                        _log.info(f"Memory search disabled: _memsearch_enabled=False (set OPENSCRUM_STORAGE_BACKEND=memsearch in ~/.env)")
+                
+                # Add memory context as system message if found
+                if memory_context:
+                    from langchain_core.messages import SystemMessage
+                    # Insert system message with memories at the beginning
+                    langchain_messages.insert(0, SystemMessage(content=memory_context))
+                
                 # Add current user message
                 langchain_messages.append(HumanMessage(content=message_text))
                 
                 # Debug: log history size (remove or set to DEBUG once verified)
-                _log = logging.getLogger(__name__)
                 roles = [m.get("info", {}).get("role", "?") for m in previous_messages]
                 _log.info(
-                    "session_message history: session_id=%s previous=%s langchain=%s roles=%s",
+                    "session_message history: session_id=%s previous=%s langchain=%s roles=%s memories=%s",
                     session_id, len(previous_messages), len(langchain_messages), roles,
+                    "yes" if memory_context else "no",
                 )
                 
                 # 7. Create agent and run with full history
@@ -1241,6 +1298,84 @@ if SESSION_AVAILABLE:
                 status_code=500,
                 detail=f"Error processing message: {str(e)}\n{traceback.format_exc()}"
             )
+
+
+# ============================================================================
+# Memsearch API (Semantic Memory Search)
+# ============================================================================
+
+if SESSION_AVAILABLE:
+    try:
+        from server.storage.memsearch_adapter import MemSearchAdapter
+        MEMSEARCH_ADAPTER_AVAILABLE = True
+    except ImportError:
+        MEMSEARCH_ADAPTER_AVAILABLE = False
+
+    if MEMSEARCH_ADAPTER_AVAILABLE:
+        @app.get("/memory/search", summary="Semantic search across conversation memories")
+        async def memory_search(
+            query: str,
+            top_k: int = 5,
+            session_id: str | None = None
+        ):
+            """
+            Semantic search across conversation memories using memsearch.
+            
+            Args:
+                query: Search query
+                top_k: Number of results to return (default: 5)
+                session_id: Optional session ID to limit search scope
+            
+            Returns:
+                List of search results with content, score, and source
+            
+            Note:
+                Requires OPENSCRUM_STORAGE_BACKEND=memsearch
+            """
+            storage = get_storage()
+            
+            # Check if storage is memsearch-enabled
+            if not hasattr(storage, 'search'):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Memsearch not enabled. Set OPENSCRUM_STORAGE_BACKEND=memsearch and restart server."
+                )
+            
+            try:
+                results = await storage.search(query, top_k=top_k, session_id=session_id)  # type: ignore
+                return {
+                    "query": query,
+                    "results": results,
+                    "count": len(results),
+                }
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+        @app.get("/memory/stats", summary="Get memory storage statistics")
+        async def memory_stats():
+            """
+            Get statistics about semantic memory storage.
+            
+            Returns information about memory storage including:
+            - Whether memsearch is enabled
+            - Number of markdown memory files
+            - Total storage size
+            """
+            storage = get_storage()
+            
+            # Check if storage is memsearch-enabled
+            if not hasattr(storage, 'get_memory_stats'):
+                return {
+                    "enabled": False,
+                    "backend": "file",
+                    "message": "Memsearch not enabled. Set OPENSCRUM_STORAGE_BACKEND=memsearch to enable semantic search."
+                }
+            
+            try:
+                stats = storage.get_memory_stats()  # type: ignore
+                return stats
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
 
 
 # ============================================================================

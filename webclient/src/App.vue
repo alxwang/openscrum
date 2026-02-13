@@ -178,6 +178,7 @@
       <!-- Session Selector Dialog -->
       <SessionSelector
         v-if="showSessionSelector"
+        :canClose="!!sessionId"
         @select="handleSelectSession"
         @create="handleCreateSession"
         @close="showSessionSelector = false"
