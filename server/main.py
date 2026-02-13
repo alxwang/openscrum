@@ -899,7 +899,7 @@ if SESSION_AVAILABLE:
                 msg_id = msg.get("info", {}).get("id")
                 if msg_id:
                     try:
-                        session_svc.remove_message(msg_id)
+                        session_svc.remove_message(session_id, msg_id)
                     except Exception as e:
                         _log = logging.getLogger(__name__)
                         _log.warning(f"Failed to remove message {msg_id}: {e}")
@@ -961,7 +961,7 @@ if SESSION_AVAILABLE:
                 msg_id = msg.get("info", {}).get("id")
                 if msg_id:
                     try:
-                        session_svc.remove_message(msg_id)
+                        session_svc.remove_message(session_id, msg_id)
                         deleted_count += 1
                     except Exception as e:
                         _log = logging.getLogger(__name__)

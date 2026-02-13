@@ -100,6 +100,8 @@ fi
 
 if ! backend_up; then
   echo "Starting OpenScrum backend on port $PORT..."
+  # Set PYTHONPATH to include server directory
+  export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
   UVICORN_LOG="$(mktemp)"
   python -m uvicorn server.main:app --host 127.0.0.1 --port "$PORT" --workers 1 >>"$UVICORN_LOG" 2>&1 &
   UVICORN_PID=$!

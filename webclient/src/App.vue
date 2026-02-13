@@ -142,9 +142,36 @@
           :class="{ 'bg-accent': isDragging }"
         ></div>
 
-        <!-- Right Pane - Empty for now -->
-        <div class="flex flex-col bg-surface/30" :style="{ width: (100 - leftPaneWidth) + '%' }">
-          <!-- Empty pane - placeholder for future content -->
+        <!-- Right Pane - Split into top and bottom -->
+        <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth) + '%' }">
+          <!-- Top Section - Empty for now -->
+          <div class="bg-surface/30 border-b border-surface-dark" :style="{ height: rightTopHeight + '%' }">
+            <!-- Empty pane - placeholder for future content -->
+          </div>
+          
+          <!-- Vertical Draggable Divider -->
+          <div 
+            @mousedown="startDraggingVertical"
+            class="h-1 bg-surface-dark hover:bg-accent cursor-row-resize transition-colors flex-shrink-0"
+            :class="{ 'bg-accent': isDraggingVertical }"
+          ></div>
+          
+          <!-- Bottom Section - Tool List and Output -->
+          <div class="flex overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
+            <!-- Tool List -->
+            <div class="w-1/2 border-r border-surface-dark">
+              <ToolList 
+                :tools="toolExecutions" 
+                :selectedTool="selectedTool"
+                @select="handleSelectTool"
+              />
+            </div>
+            
+            <!-- Tool Output -->
+            <div class="w-1/2">
+              <ToolOutput :tool="selectedTool" />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -172,6 +199,8 @@ import { useApiClient } from './composables/useApiClient'
 import SessionSelector from './components/SessionSelector.vue'
 import PermissionDialog from './components/PermissionDialog.vue'
 import ProgressTracker from './components/ProgressTracker.vue'
+import ToolList from './components/ToolList.vue'
+import ToolOutput from './components/ToolOutput.vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
@@ -209,6 +238,12 @@ const permissionResolve = ref(null)
 // Resizable panes state
 const leftPaneWidth = ref(66.67) // 2/3 of screen width in percentage
 const isDragging = ref(false)
+const rightTopHeight = ref(33.33) // 1/3 of right pane height in percentage
+const isDraggingVertical = ref(false)
+
+// Tool execution tracking
+const toolExecutions = ref([])
+const selectedTool = ref(null)
 
 // Display name: prefer session.title from server, fallback to 'Untitled Session'
 const sessionDisplayName = computed(() => {
@@ -216,6 +251,57 @@ const sessionDisplayName = computed(() => {
   if (!s) return ''
   return (s.title && s.title.trim()) || 'Untitled Session'
 })
+
+// Helper to extract tool executions from message history
+const extractToolExecutions = (messageHistory) => {
+  const tools = []
+  
+  for (const msg of messageHistory) {
+    const parts = msg.parts || []
+    for (const part of parts) {
+      // Check if it's a tool part
+      if (part.type === 'tool' && part.state) {
+        const state = part.state
+        tools.push({
+          name: part.tool || state.title || 'unknown',
+          input: state.input || null,
+          output: state.output || null,
+          status: state.status || 'pending',
+          timestamp: state.time?.start || msg.info?.time?.created || Date.now()
+        })
+      }
+    }
+  }
+  
+  return tools
+}
+
+// Auto-calculate optimal chat pane width based on content
+const calculateOptimalChatWidth = () => {
+  // If there are tool executions, give more space to the right pane
+  if (toolExecutions.value.length > 0) {
+    // With tools: 60% chat, 40% for tools panel
+    return 60
+  }
+  
+  // If there are messages but no tool executions yet
+  if (messages.value.length > 0) {
+    // Calculate average message length to determine if we need more width
+    const totalLength = messages.value.reduce((sum, msg) => sum + (msg.content?.length || 0), 0)
+    const avgLength = totalLength / messages.value.length
+    
+    // If messages are long/complex (avg > 500 chars), give more space to chat
+    if (avgLength > 500) {
+      return 70
+    }
+    
+    // Medium complexity messages
+    return 66.67
+  }
+  
+  // Empty session or new session: default to 70% for chat
+  return 70
+}
 
 // Configure marked for markdown rendering
 marked.setOptions({
@@ -289,7 +375,13 @@ const handleCompressContext = async () => {
     await compressContext(sessionId.value)
     // Reload messages after compression
     const messageHistory = await getSessionMessages(sessionId.value)
-    messages.value = messageHistory.map(msg => {
+    
+    // Extract tool executions from remaining messages
+    toolExecutions.value = extractToolExecutions(messageHistory)
+    selectedTool.value = null
+    
+    // Convert messages (server returns newest first, so reverse)
+    messages.value = messageHistory.reverse().map(msg => {
       const info = msg.info
       const role = info.role === 'user' ? 'user' : 'agent'
       let content = ''
@@ -301,6 +393,9 @@ const handleCompressContext = async () => {
       }
       return { role, content }
     }).filter(msg => msg.content)
+    
+    // Recalculate optimal width
+    leftPaneWidth.value = calculateOptimalChatWidth()
     
     await nextTick()
     scrollToBottom()
@@ -321,6 +416,12 @@ const handleResetContext = async () => {
   try {
     await resetContext(sessionId.value)
     messages.value = []
+    toolExecutions.value = []
+    selectedTool.value = null
+    
+    // Reset pane width to default
+    leftPaneWidth.value = calculateOptimalChatWidth()
+    
     alert('Context reset successfully!')
   } catch (error) {
     console.error('Failed to reset context:', error)
@@ -353,6 +454,38 @@ const stopDragging = () => {
   document.removeEventListener('mouseup', stopDragging)
   document.body.style.cursor = ''
   document.body.style.userSelect = ''
+}
+
+// Vertical resizable pane handlers (for right pane top/bottom split)
+const startDraggingVertical = () => {
+  isDraggingVertical.value = true
+  document.addEventListener('mousemove', handleDragVertical)
+  document.addEventListener('mouseup', stopDraggingVertical)
+  document.body.style.cursor = 'row-resize'
+  document.body.style.userSelect = 'none'
+}
+
+const handleDragVertical = (e) => {
+  if (!isDraggingVertical.value) return
+  const rightPane = document.querySelector('.right-pane')
+  if (!rightPane) return
+  const rect = rightPane.getBoundingClientRect()
+  const offsetY = e.clientY - rect.top
+  const newHeight = (offsetY / rect.height) * 100
+  // Constrain between 20% and 80%
+  rightTopHeight.value = Math.max(20, Math.min(80, newHeight))
+}
+
+const stopDraggingVertical = () => {
+  isDraggingVertical.value = false
+  document.removeEventListener('mousemove', handleDragVertical)
+  document.removeEventListener('mouseup', stopDraggingVertical)
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+}
+
+const handleSelectTool = (tool) => {
+  selectedTool.value = tool
 }
 
 const sendMessage = async () => {
@@ -409,6 +542,22 @@ const sendMessage = async () => {
         } else if (chunkType === 'tool_call') {
           currentToolName = chunk.tool_name
           currentTool.value = chunk.tool_name
+          
+          // Track tool execution
+          const toolExecution = {
+            name: chunk.tool_name,
+            input: chunk.tool_input,
+            output: null,
+            status: 'pending',
+            timestamp: Date.now()
+          }
+          toolExecutions.value.push(toolExecution)
+          
+          // Auto-adjust width when first tool is executed to give more space to tools panel
+          if (toolExecutions.value.length === 1) {
+            leftPaneWidth.value = calculateOptimalChatWidth()
+          }
+          
           // Extract bash command if it's a bash tool call
           if (chunk.tool_name === 'bash' && chunk.tool_input) {
             try {
@@ -434,6 +583,15 @@ const sendMessage = async () => {
           await nextTick()
           scrollToBottom()
         } else if (chunkType === 'tool_result') {
+          // Update the last tool execution with the result
+          if (toolExecutions.value.length > 0) {
+            const lastTool = toolExecutions.value[toolExecutions.value.length - 1]
+            if (lastTool.status === 'pending') {
+              lastTool.output = chunk.tool_output
+              lastTool.status = 'completed'
+            }
+          }
+          
           currentToolName = null
           currentTool.value = null
           currentToolCommand.value = null
@@ -514,6 +672,9 @@ const handleExitSession = () => {
   clearSession()
   currentSession.value = null
   messages.value = []
+  toolExecutions.value = []
+  selectedTool.value = null
+  leftPaneWidth.value = 70 // Reset to default width
   showSessionSelector.value = true
 }
 
@@ -524,14 +685,23 @@ const handleSelectSession = async (id) => {
     currentSession.value = session
     showSessionSelector.value = false
     
+    // Clear tool executions for new session
+    toolExecutions.value = []
+    selectedTool.value = null
+    
     // Load message history from session
     try {
       const messageHistory = await getSessionMessages(id)
       console.log('Loaded message history:', messageHistory)
       
+      // Extract tool executions from message parts
+      toolExecutions.value = extractToolExecutions(messageHistory)
+      console.log('Extracted tool executions:', toolExecutions.value)
+      
       // Convert backend format to frontend format
-      // Server returns: [{info: {role: 'user'|'assistant', ...}, parts: [{type: 'text', text: '...'}]}]
-      messages.value = messageHistory.map(msg => {
+      // Server returns messages newest first, so reverse to get chronological order
+      // [{info: {role: 'user'|'assistant', ...}, parts: [{type: 'text', text: '...'}]}]
+      messages.value = messageHistory.reverse().map(msg => {
         const info = msg.info
         const role = info.role === 'user' ? 'user' : 'agent'
         
@@ -549,9 +719,13 @@ const handleSelectSession = async (id) => {
       }).filter(msg => msg.content) // Skip empty messages
       
       console.log('Converted messages:', messages.value)
+      
+      // Auto-calculate optimal chat pane width
+      leftPaneWidth.value = calculateOptimalChatWidth()
     } catch (error) {
       console.error('Failed to load message history:', error)
       messages.value = []
+      leftPaneWidth.value = 70
     }
     
     await nextTick()
@@ -569,6 +743,11 @@ const handleCreateSession = (payload) => {
   currentSession.value = { ...session, title: sessionName || (session?.title) }
   showSessionSelector.value = false
   messages.value = []
+  toolExecutions.value = []
+  selectedTool.value = null
+  
+  // Auto-calculate optimal chat pane width for new session
+  leftPaneWidth.value = calculateOptimalChatWidth()
 }
 
 const initializeSession = async () => {
@@ -588,8 +767,13 @@ const initializeSession = async () => {
           const messageHistory = await getSessionMessages(sessionId.value)
           console.log('Loaded message history on init:', messageHistory)
           
+          // Extract tool executions from message parts
+          toolExecutions.value = extractToolExecutions(messageHistory)
+          console.log('Extracted tool executions on init:', toolExecutions.value)
+          
           // Convert backend format to frontend format
-          messages.value = messageHistory.map(msg => {
+          // Server returns messages newest first, so reverse to get chronological order
+          messages.value = messageHistory.reverse().map(msg => {
             const info = msg.info
             const role = info.role === 'user' ? 'user' : 'agent'
             
@@ -607,11 +791,15 @@ const initializeSession = async () => {
           
           console.log('Converted messages on init:', messages.value)
           
+          // Auto-calculate optimal chat pane width
+          leftPaneWidth.value = calculateOptimalChatWidth()
+          
           await nextTick()
           scrollToBottom()
         } catch (error) {
           console.error('Failed to load message history:', error)
           messages.value = []
+          leftPaneWidth.value = 70
         }
       } catch (error) {
         // Session doesn't exist, clear it and show selector
