@@ -190,8 +190,20 @@ class MemSearchAdapter(Storage):
             logging.debug(f"Could not trigger indexing: {e}")
 
     def write(self, key: List[str], value: Any) -> None:
-        """Write value to JSON storage and optionally export to markdown."""
+        """Write value to JSON storage and optionally export to markdown.
+        
+        Also maintains a reverse index for message_id -> session_id to enable O(1) lookups.
+        Index key format: ["index", "message_session", message_id] -> session_id
+        """
         super().write(key, value)
+        
+        # Maintain index: message_id -> session_id
+        if len(key) == 3 and key[0] == "message":
+            # key = ["message", session_id, message_id]
+            session_id = key[1]
+            message_id = key[2]
+            # Write index entry (recurses to super().write via this method, but key starts with "index")
+            self.write(["index", "message_session", message_id], session_id)
         
         # Export when parts are written (messages have content then)
         if self._memsearch_enabled and len(key) >= 2:
@@ -207,18 +219,38 @@ class MemSearchAdapter(Storage):
         Fetches message info and parts from storage.
         """
         try:
-            # Find the message - search through sessions
-            # This is inefficient but messages should have minimal writes
+            # Find the message - try O(1) index lookup first
             message = None
             session_id = None
             
-            # Get all message keys to find the session
-            all_keys = self.list(["message"])
-            for key in all_keys:
-                if len(key) == 3 and key[2] == message_id:
-                    session_id = key[1]
-                    message = self.read(key)
-                    break
+            try:
+                # fast path: lookup session_id from index
+                session_id = self.read(["index", "message_session", message_id])
+                if session_id:
+                    # Verify session exists (optional, but good for consistency)
+                    # Now read the message directly: ["message", session_id, message_id]
+                    try:
+                        message = self.read(["message", session_id, message_id])
+                    except Exception:
+                        # Message might have been deleted or index is stale
+                        message = None
+            except Exception:
+                # Index missing (backward compatibility for old messages)
+                session_id = None
+
+            # Fallback: O(N) scan if index lookup failed
+            if not message or not session_id:
+                # Get all message keys to find the session
+                all_keys = self.list(["message"])
+                for key in all_keys:
+                    if len(key) == 3 and key[2] == message_id:
+                        session_id = key[1]
+                        message = self.read(key)
+                        
+                        # Backfill index for next time
+                        if session_id:
+                            self.write(["index", "message_session", message_id], session_id)
+                        break
             
             if not message or not session_id:
                 return

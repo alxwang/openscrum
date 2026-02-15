@@ -289,6 +289,8 @@ async def stream_agent_response_with_save(
     Yields:
         JSON strings of ChatChunk objects in Server-Sent Events format
     """
+    _log = logging.getLogger(__name__)
+    
     if not SESSION_AVAILABLE:
         # Fallback to non-saving stream
         async for chunk in stream_agent_response(agent, initial_state):
@@ -482,6 +484,14 @@ async def stream_agent_response_with_save(
                     # Handle text content
                     elif isinstance(message, AIMessage) and message.content:
                         content = str(message.content)
+                        # Debug: log first 200 chars to see what LLM is returning
+                        if not assistant_text_parts:  # Only log once at start
+                            _log.info(f"[LLM Response] First 200 chars: {content[:200]}")
+                            _log.info(f"[LLM Response] Starts with {{? {content.strip().startswith('{')}")
+                            _log.info(f"[LLM Response] message type: {type(message)}, has additional_kwargs? {hasattr(message, 'additional_kwargs')}")
+                            if hasattr(message, 'additional_kwargs'):
+                                _log.info(f"[LLM Response] additional_kwargs: {message.additional_kwargs}")
+                        
                         if not (hasattr(message, 'tool_calls') and message.tool_calls):
                             # Only stream the new content that hasn't been sent yet
                             new_content = content[sent_content_length:]
@@ -494,7 +504,11 @@ async def stream_agent_response_with_save(
                                     chat_chunk = ChatChunk(type="token", content=chunk_text)
                                     yield f"data: {chat_chunk.model_dump_json()}\n\n"
         
-        done_chunk = ChatChunk(type="done")
+        # Send the complete final content in the done chunk so frontend can check for questions
+        full_text = "\n".join(assistant_text_parts) if assistant_text_parts else ""
+        _log.info(f"[Done Chunk] Sending full_text length: {len(full_text)}, starts with {{? {full_text.strip().startswith('{') if full_text else False}")
+        _log.info(f"[Done Chunk] First 200 chars: {full_text[:200] if full_text else '(empty)'}")
+        done_chunk = ChatChunk(type="done", content=full_text)
         yield f"data: {done_chunk.model_dump_json()}\n\n"
 
     except Exception as e:

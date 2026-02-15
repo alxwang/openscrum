@@ -32,3 +32,4 @@ python-dotenv>=1.0.0
 
 # Semantic memory search (optional: use OPENSCRUM_STORAGE_BACKEND=memsearch)
 memsearch>=0.1.0
+filelock>=3.13.0

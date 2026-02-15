@@ -106,6 +106,14 @@
           <!-- Input Area -->
           <footer class="border-t border-surface-dark px-6 py-4">
             <div class="flex flex-col gap-2 max-w-4xl">
+              <!-- Questions Pending Notice -->
+              <div v-if="pendingQuestionData" class="bg-accent/20 border border-accent rounded-lg p-3 flex items-center gap-2">
+                <svg class="w-5 h-5 text-accent flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span class="text-sm text-text-inverse">The agent has asked {{ pendingQuestionData.questions.length }} question{{ pendingQuestionData.questions.length > 1 ? 's' : '' }}. Please answer in the dialog above.</span>
+              </div>
+              
               <!-- Markdown Preview -->
               <div v-if="inputMessage.trim()" class="bg-surface-dark rounded-lg p-3 border border-surface max-h-32 overflow-y-auto custom-scrollbar">
                 <div class="prose prose-sm prose-invert max-w-none" v-html="marked.parse(inputMessage)"></div>
@@ -118,15 +126,16 @@
                   @keydown.enter.exact.prevent="sendMessage"
                   @keydown.shift.enter.exact="inputMessage += '\n'"
                   placeholder="Type your message with markdown support... (Enter to send, Shift+Enter for newline)"
-                  :disabled="!sessionId"
+                  :disabled="!sessionId || pendingQuestionData"
                   class="flex-1 px-4 py-3 bg-accent text-text-inverse rounded-2xl border-none focus:outline-none focus:ring-2 focus:ring-accent-hover resize-none custom-scrollbar disabled:opacity-50 disabled:cursor-not-allowed placeholder-text-inverse/60"
                   rows="5"
                   ref="inputRef"
                 ></textarea>
                 <button
                   @click="sendMessage"
-                  :disabled="!inputMessage.trim() || isSending || !sessionId"
+                  :disabled="!inputMessage.trim() || isSending || !sessionId || pendingQuestionData"
                   class="px-6 py-3 bg-accent hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium transition-colors self-end"
+                >
                 >
                   Send
                 </button>
@@ -144,9 +153,13 @@
 
         <!-- Right Pane - Split into top and bottom -->
         <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth) + '%' }">
-          <!-- Top Section - Empty for now -->
-          <div class="bg-surface/30 border-b border-surface-dark" :style="{ height: rightTopHeight + '%' }">
-            <!-- Empty pane - placeholder for future content -->
+          <!-- Top Section - Tool List -->
+          <div class="bg-surface/30 border-b border-surface-dark overflow-auto" :style="{ height: rightTopHeight + '%' }">
+            <ToolList 
+              :tools="toolExecutions" 
+              :selectedTool="selectedTool"
+              @select="handleSelectTool"
+            />
           </div>
           
           <!-- Vertical Draggable Divider -->
@@ -156,21 +169,9 @@
             :class="{ 'bg-accent': isDraggingVertical }"
           ></div>
           
-          <!-- Bottom Section - Tool List and Output -->
-          <div class="flex overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
-            <!-- Tool List -->
-            <div class="w-1/2 border-r border-surface-dark">
-              <ToolList 
-                :tools="toolExecutions" 
-                :selectedTool="selectedTool"
-                @select="handleSelectTool"
-              />
-            </div>
-            
-            <!-- Tool Output -->
-            <div class="w-1/2">
-              <ToolOutput :tool="selectedTool" />
-            </div>
+          <!-- Bottom Section - Tool Output -->
+          <div class="flex-1 overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
+            <ToolOutput :tool="selectedTool" />
           </div>
         </div>
       </div>
@@ -190,15 +191,24 @@
         :permission="pendingPermission"
         @reply="handlePermissionReply"
       />
+
+      <!-- Question Dialog -->
+      <QuestionDialog
+        v-if="pendingQuestionData"
+        :questionData="pendingQuestionData"
+        @submit="handleQuestionSubmit"
+        @skip="handleQuestionSkip"
+      />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useApiClient } from './composables/useApiClient'
 import SessionSelector from './components/SessionSelector.vue'
 import PermissionDialog from './components/PermissionDialog.vue'
+import QuestionDialog from './components/QuestionDialog.vue'
 import ProgressTracker from './components/ProgressTracker.vue'
 import ToolList from './components/ToolList.vue'
 import ToolOutput from './components/ToolOutput.vue'
@@ -235,6 +245,11 @@ const currentSession = ref(null)
 const isInitializing = ref(true)
 const pendingPermission = ref(null)
 const permissionResolve = ref(null)
+const pendingQuestionData = ref(null)
+
+// Session state tracking - persisted across reloads
+// States: 'idle' | 'thinking' | 'working' | 'waiting_permission' | 'executing_tool'
+const sessionState = ref('idle')
 
 // Resizable panes state
 const leftPaneWidth = ref(66.67) // 2/3 of screen width in percentage
@@ -252,6 +267,102 @@ const sessionDisplayName = computed(() => {
   if (!s) return ''
   return (s.title && s.title.trim()) || 'Untitled Session'
 })
+
+// State persistence helpers
+const saveSessionState = () => {
+  if (!sessionId.value) return
+  
+  const state = {
+    sessionState: sessionState.value,
+    isThinking: isThinking.value,
+    thinkingMessage: thinkingMessage.value,
+    currentTool: currentTool.value,
+    currentToolCommand: currentToolCommand.value,
+    pendingQuestionData: pendingQuestionData.value,
+    timestamp: Date.now()
+  }
+  
+  try {
+    const key = `openscrum_state_${sessionId.value}`
+    localStorage.setItem(key, JSON.stringify(state))
+    console.log('[State] Saved session state to', key)
+    console.log('[State] pendingQuestionData saved?', !!state.pendingQuestionData)
+    if (state.pendingQuestionData) {
+      console.log('[State] Question data keys:', Object.keys(state.pendingQuestionData))
+    }
+  } catch (error) {
+    console.error('[State] Failed to save state:', error)
+  }
+}
+
+const restoreSessionState = () => {
+  if (!sessionId.value) return
+  
+  try {
+    const key = `openscrum_state_${sessionId.value}`
+    const saved = localStorage.getItem(key)
+    console.log('[State] Attempting to restore from', key)
+    console.log('[State] localStorage value exists?', !!saved)
+    
+    if (saved) {
+      const state = JSON.parse(saved)
+      
+      // Only restore if timestamp is recent (within 1 hour)
+      const age = Date.now() - (state.timestamp || 0)
+      console.log('[State] Saved state age (ms):', age, 'max:', 3600000)
+      
+      if (age < 3600000) {
+        sessionState.value = state.sessionState || 'idle'
+        isThinking.value = state.isThinking || false
+        thinkingMessage.value = state.thinkingMessage || 'Thinking...'
+        currentTool.value = state.currentTool || null
+        currentToolCommand.value = state.currentToolCommand || null
+        pendingQuestionData.value = state.pendingQuestionData || null
+        console.log('[State] Restored session state')
+        console.log('[State] pendingQuestionData restored?', !!pendingQuestionData.value)
+        if (pendingQuestionData.value) {
+          console.log('[State] Restored question data:', pendingQuestionData.value)
+        } else {
+          console.log('[State] No pendingQuestionData in saved state')
+        }
+      } else {
+        console.log('[State] Saved state too old, starting fresh')
+        clearSessionState()
+      }
+    } else {
+      console.log('[State] No saved state found in localStorage')
+    }
+  } catch (error) {
+    console.error('[State] Failed to restore state:', error)
+  }
+}
+
+const clearSessionState = () => {
+  if (!sessionId.value) return
+  
+  try {
+    localStorage.removeItem(`openscrum_state_${sessionId.value}`)
+    sessionState.value = 'idle'
+    isThinking.value = false
+    thinkingMessage.value = 'Thinking...'
+    currentTool.value = null
+    currentToolCommand.value = null
+    pendingQuestionData.value = null
+    console.log('[State] Cleared session state')
+  } catch (error) {
+    console.error('[State] Failed to clear state:', error)
+  }
+}
+
+const updateSessionState = (newState, thinking = false, message = 'Thinking...', tool = null, command = null) => {
+  sessionState.value = newState
+  isThinking.value = thinking
+  thinkingMessage.value = message
+  currentTool.value = tool
+  currentToolCommand.value = command
+  saveSessionState()
+  console.log('[State] Updated to:', newState, 'thinking:', thinking)
+}
 
 // Helper to extract tool executions from message history
 const extractToolExecutions = (messageHistory) => {
@@ -361,6 +472,75 @@ const formatMessageContent = (content) => {
   return content
 }
 
+// Helper to detect structured JSON questions in agent's message
+const detectStructuredQuestions = (content) => {
+  console.log('[Questions] detectStructuredQuestions called, content type:', typeof content, 'length:', content?.length)
+  
+  if (!content || typeof content !== 'string') {
+    console.log('[Questions] Content is not a string, returning null')
+    return null
+  }
+  
+  // Try to parse as JSON
+  const trimmed = content.trim()
+  console.log('[Questions] Trimmed content starts with {?', trimmed.startsWith('{'), 'ends with }?', trimmed.endsWith('}'))
+  
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+    console.log('[Questions] Content is not JSON-like, returning null')
+    return null
+  }
+  
+  try {
+    console.log('[Questions] Attempting to parse JSON...')
+    const parsed = JSON.parse(trimmed)
+    console.log('[Questions] Successfully parsed JSON, keys:', Object.keys(parsed))
+    
+    // Check if it has the questions structure directly
+    if (parsed.type === 'questions' && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+      console.log('[Questions] ✓ Detected structured questions (direct format):', parsed)
+      return parsed
+    }
+    
+    // Check if questions are nested under a 'questions' property
+    if (parsed.questions && typeof parsed.questions === 'object') {
+      console.log('[Questions] Found nested questions property, checking structure...')
+      const questionsData = parsed.questions
+      console.log('[Questions] questionsData type:', questionsData.type, 'has questions array?', Array.isArray(questionsData.questions))
+      
+      if (questionsData.type === 'questions' && Array.isArray(questionsData.questions) && questionsData.questions.length > 0) {
+        console.log('[Questions] ✓ Detected structured questions (nested format):', questionsData)
+        return questionsData
+      } else {
+        console.log('[Questions] Nested questions object does not match expected structure')
+      }
+    } else {
+      console.log('[Questions] No questions property found or it is not an object')
+    }
+  } catch (e) {
+    // Not valid JSON or not questions structure
+    console.log('[Questions] Failed to parse JSON:', e.message)
+  }
+  
+  console.log('[Questions] No questions detected, returning null')
+  return null
+}
+
+const handleQuestionSubmit = async (answersObj) => {
+  pendingQuestionData.value = null
+  
+  // Format answers as JSON string for the agent
+  const answersText = 'Here are my answers:\n```json\n' + JSON.stringify(answersObj, null, 2) + '\n```'
+  
+  // Send the answers as a new user message
+  inputMessage.value = answersText
+  await sendMessage()
+}
+
+const handleQuestionSkip = () => {
+  pendingQuestionData.value = null
+  // Don't send anything, just close the dialog
+}
+
 const toggleMode = () => {
   mode.value = mode.value === 'plan' ? 'edit' : 'plan'
 }
@@ -395,6 +575,29 @@ const handleCompressContext = async () => {
       return { role, content }
     }).filter(msg => msg.content)
     
+    // Check if the last message contains questions
+    if (messages.value.length > 0) {
+      const lastMessage = messages.value[messages.value.length - 1]
+      if (lastMessage && lastMessage.role === 'agent') {
+        console.log('[Questions] Checking last message after compress for questions...')
+        const questionData = detectStructuredQuestions(lastMessage.content)
+        if (questionData) {
+          console.log('[Questions] ✓ Found questions in last message after compress')
+          pendingQuestionData.value = questionData
+          
+          // Update the message content to show only the text part
+          try {
+            const parsed = JSON.parse(lastMessage.content.trim())
+            if (parsed.content && typeof parsed.content === 'string') {
+              lastMessage.content = parsed.content
+            }
+          } catch (e) {
+            // Keep original if parsing fails
+          }
+        }
+      }
+    }
+    
     // Recalculate optimal width
     leftPaneWidth.value = calculateOptimalChatWidth()
     
@@ -410,7 +613,7 @@ const handleCompressContext = async () => {
 const handleResetContext = async () => {
   if (!sessionId.value || messages.value.length === 0) return
   
-  if (!confirm('Reset all conversation history? This will permanently delete all messages. This action cannot be undone.')) {
+  if (!confirm('Reset all conversation history? This will permanently delete all messages and clear all state. This action cannot be undone.')) {
     return
   }
   
@@ -419,6 +622,10 @@ const handleResetContext = async () => {
     messages.value = []
     toolExecutions.value = []
     selectedTool.value = null
+    pendingQuestionData.value = null
+    
+    // Clear session state (thinking indicator, etc.)
+    clearSessionState()
     
     // Reset pane width to default
     leftPaneWidth.value = calculateOptimalChatWidth()
@@ -507,8 +714,7 @@ const sendMessage = async () => {
   scrollToBottom()
 
   // Show thinking indicator
-  isThinking.value = true
-  thinkingMessage.value = 'Agent is thinking...'
+  updateSessionState('thinking', true, 'Agent is thinking...')
 
   try {
     let agentContent = ''
@@ -520,12 +726,12 @@ const sendMessage = async () => {
       mode.value,
       async (chunk) => {
         const chunkType = chunk.type
+        console.log('[Stream] Chunk type:', chunkType, 'isThinking:', isThinking.value)
 
         if (chunkType === 'token') {
           agentContent += chunk.content || ''
-          isThinking.value = false
-          currentTool.value = null
-          currentToolCommand.value = null
+          updateSessionState('idle', false)
+          console.log('[Stream] Token received, state set to idle')
           
           // Update or create agent message
           const lastMessage = messages.value[messages.value.length - 1]
@@ -542,7 +748,7 @@ const sendMessage = async () => {
           scrollToBottom()
         } else if (chunkType === 'tool_call') {
           currentToolName = chunk.tool_name
-          currentTool.value = chunk.tool_name
+          console.log('[Stream] Tool call:', chunk.tool_name, 'setting state to working')
           
           // Track tool execution
           const toolExecution = {
@@ -563,27 +769,42 @@ const sendMessage = async () => {
           if (chunk.tool_name === 'bash' && chunk.tool_input) {
             try {
               const input = typeof chunk.tool_input === 'string' ? JSON.parse(chunk.tool_input) : chunk.tool_input
-              currentToolCommand.value = input.command || null
+              const cmd = input.command || null
+              updateSessionState('executing_tool', true, 'Agent is working...', chunk.tool_name, cmd)
             } catch (e) {
-              currentToolCommand.value = null
+              updateSessionState('executing_tool', true, 'Agent is working...', chunk.tool_name)
             }
           } else {
-            currentToolCommand.value = null
+            updateSessionState('executing_tool', true, 'Agent is working...', chunk.tool_name)
           }
-          isThinking.value = true
-          thinkingMessage.value = `Agent is working...`
+          console.log('[Stream] Tool call UI updated, state:', sessionState.value)
           await nextTick()
           scrollToBottom()
         } else if (chunkType === 'permission_request') {
           // Handle permission request
           const perm = chunk.permission_request || {}
+          console.log('[Stream] Permission request, showing dialog')
+          // Update state to waiting for permission
+          updateSessionState('waiting_permission', true, 'Permission required...', perm.tool || null)
+          await nextTick()
+          scrollToBottom()
+          
+          console.log('[Stream] Waiting for permission reply...')
           const reply = await handlePermissionRequest(perm)
-          if (reply) {
-            // Permission reply will be handled by API client
+          console.log('[Stream] Got permission reply:', reply)
+          
+          // After user responds, update state accordingly
+          if (reply && reply.decision === 'approved') {
+            updateSessionState('executing_tool', true, 'Tool executing...', perm.tool || null)
+            console.log('[Stream] Permission approved, state:', sessionState.value)
+          } else if (reply && reply.decision === 'rejected') {
+            updateSessionState('thinking', true, 'Permission denied, continuing...')
+            console.log('[Stream] Permission rejected, state:', sessionState.value)
           }
           await nextTick()
           scrollToBottom()
         } else if (chunkType === 'tool_result') {
+          console.log('[Stream] Tool result received')
           // Update the last tool execution with the result
           if (toolExecutions.value.length > 0) {
             const lastTool = toolExecutions.value[toolExecutions.value.length - 1]
@@ -593,25 +814,56 @@ const sendMessage = async () => {
             }
           }
           
-          currentToolName = null
-          currentTool.value = null
-          currentToolCommand.value = null
-          isThinking.value = false
+          // Update state - LLM is now processing the tool result
+          updateSessionState('thinking', true, 'Agent is thinking...')
+          console.log('[Stream] Tool result processed, waiting for LLM response')
           await nextTick()
           scrollToBottom()
         } else if (chunkType === 'done') {
-          isThinking.value = false
+          // Use content from done chunk if available (contains complete final response)
+          const finalContent = chunk.content || agentContent
+          console.log('[Stream] Done chunk received')
+          console.log('[Stream] Done chunk content length:', chunk.content?.length || 0)
+          console.log('[Stream] Accumulated agentContent length:', agentContent?.length || 0)
+          console.log('[Stream] Using content, first 200 chars:', finalContent?.substring(0, 200))
+          
+          updateSessionState('idle', false)
           currentTool.value = null
           currentToolCommand.value = null
-          if (agentContent) {
-            // Ensure final message is rendered
+          
+          if (finalContent) {
+            // Check if the agent returned structured questions
+            console.log('[Questions] Checking for questions in final content...')
+            const questionData = detectStructuredQuestions(finalContent)
+            console.log('[Questions] Detection result:', questionData ? 'FOUND' : 'NOT FOUND')
+            
+            // If we found questions, extract the content separately
+            let displayContent = finalContent
+            if (questionData) {
+              try {
+                const parsed = JSON.parse(finalContent.trim())
+                // If there's a separate content field, use that for display
+                if (parsed.content && typeof parsed.content === 'string') {
+                  displayContent = parsed.content
+                  console.log('[Questions] Extracted display content, length:', displayContent.length)
+                }
+              } catch (e) {
+                // Keep original content if parsing fails
+                console.log('[Questions] Failed to extract content:', e.message)
+              }
+              console.log('[Questions] Setting pendingQuestionData.value')
+              pendingQuestionData.value = questionData
+              console.log('[Questions] pendingQuestionData.value is now:', !!pendingQuestionData.value)
+            }
+            
+            // Ensure final message is rendered with the display content
             const lastMessage = messages.value[messages.value.length - 1]
             if (lastMessage && lastMessage.role === 'agent') {
-              lastMessage.content = agentContent
+              lastMessage.content = displayContent
             }
           }
         } else if (chunkType === 'error') {
-          isThinking.value = false
+          updateSessionState('idle', false)
           messages.value.push({
             role: 'agent',
             content: `**Error:** ${chunk.content}`,
@@ -621,7 +873,7 @@ const sendMessage = async () => {
     )
   } catch (error) {
     console.error('Error sending message:', error)
-    isThinking.value = false
+    updateSessionState('idle', false)
     messages.value.push({
       role: 'agent',
       content: `**Error:** ${error.message}`,
@@ -660,21 +912,36 @@ const handlePermissionReply = async (reply) => {
     permissionResolve.value(reply)
     permissionResolve.value = null
   }
+  
+  // Note: isThinking state is managed by the permission_request handler
+  // after this reply is returned
 }
 
-const scrollToBottom = () => {
-  const main = document.querySelector('main')
-  if (main) {
-    main.scrollTop = main.scrollHeight
-  }
+const scrollToBottom = (smooth = false) => {
+  // Use requestAnimationFrame to ensure DOM is fully updated
+  requestAnimationFrame(() => {
+    const main = document.querySelector('main')
+    if (main) {
+      if (smooth) {
+        main.scrollTo({
+          top: main.scrollHeight,
+          behavior: 'smooth'
+        })
+      } else {
+        main.scrollTop = main.scrollHeight
+      }
+    }
+  })
 }
 
 const handleExitSession = () => {
   clearSession()
+  clearSessionState()
   currentSession.value = null
   messages.value = []
   toolExecutions.value = []
   selectedTool.value = null
+  pendingQuestionData.value = null
   leftPaneWidth.value = 70 // Reset to default width
   showSessionSelector.value = true
 }
@@ -723,6 +990,33 @@ const handleSelectSession = async (id) => {
       
       // Auto-calculate optimal chat pane width
       leftPaneWidth.value = calculateOptimalChatWidth()
+      
+      // Restore session state (thinking indicator, etc.) - DO THIS FIRST
+      restoreSessionState()
+      
+      // Check if the last message contains questions (if not already restored from state)
+      if (!pendingQuestionData.value && messages.value.length > 0) {
+        const lastMessage = messages.value[messages.value.length - 1]
+        if (lastMessage && lastMessage.role === 'agent') {
+          console.log('[Questions] Checking last message on session select for questions...')
+          const questionData = detectStructuredQuestions(lastMessage.content)
+          if (questionData) {
+            console.log('[Questions] ✓ Found questions in last message on session select')
+            pendingQuestionData.value = questionData
+            
+            // Update the message content to show only the text part
+            try {
+              const parsed = JSON.parse(lastMessage.content.trim())
+              if (parsed.content && typeof parsed.content === 'string') {
+                lastMessage.content = parsed.content
+                console.log('[Questions] Extracted display content from nested JSON')
+              }
+            } catch (e) {
+              // Keep original if parsing fails
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error('Failed to load message history:', error)
       messages.value = []
@@ -746,6 +1040,10 @@ const handleCreateSession = (payload) => {
   messages.value = []
   toolExecutions.value = []
   selectedTool.value = null
+  pendingQuestionData.value = null
+  
+  // Clear state for new session
+  clearSessionState()
   
   // Auto-calculate optimal chat pane width for new session
   leftPaneWidth.value = calculateOptimalChatWidth()
@@ -795,6 +1093,33 @@ const initializeSession = async () => {
           // Auto-calculate optimal chat pane width
           leftPaneWidth.value = calculateOptimalChatWidth()
           
+          // Restore session state (thinking indicator, etc.) - DO THIS FIRST
+          restoreSessionState()
+          
+          // Check if the last message contains questions (if not already restored from state)
+          if (!pendingQuestionData.value && messages.value.length > 0) {
+            const lastMessage = messages.value[messages.value.length - 1]
+            if (lastMessage && lastMessage.role === 'agent') {
+              console.log('[Questions] Checking last message on init for questions...')
+              const questionData = detectStructuredQuestions(lastMessage.content)
+              if (questionData) {
+                console.log('[Questions] ✓ Found questions in last message on init')
+                pendingQuestionData.value = questionData
+                
+                // Update the message content to show only the text part
+                try {
+                  const parsed = JSON.parse(lastMessage.content.trim())
+                  if (parsed.content && typeof parsed.content === 'string') {
+                    lastMessage.content = parsed.content
+                    console.log('[Questions] Extracted display content from nested JSON')
+                  }
+                } catch (e) {
+                  // Keep original if parsing fails
+                }
+              }
+            }
+          }
+          
           await nextTick()
           scrollToBottom()
         } catch (error) {
@@ -819,6 +1144,62 @@ const initializeSession = async () => {
     isInitializing.value = false
   }
 }
+
+// Watch for permission dialog closing to auto-scroll
+watch(pendingPermission, async (newVal, oldVal) => {
+  if (oldVal && !newVal) {
+    await nextTick()
+    scrollToBottom()
+  }
+})
+
+// Watch for when we finish sending (transition to waiting for user input)
+// and check if the last LLM response contains questions
+watch(isSending, async (newVal, oldVal) => {
+  console.log('[Questions] isSending watch triggered, oldVal:', oldVal, 'newVal:', newVal)
+  // When we transition from sending to idle (waiting for user input)
+  if (oldVal && !newVal && messages.value.length > 0) {
+    console.log('[Questions] Transitioned from sending to idle, checking last message...')
+    const lastMessage = messages.value[messages.value.length - 1]
+    
+    // Only check agent messages
+    if (lastMessage && lastMessage.role === 'agent') {
+      console.log('[Questions] Last message is from agent, content length:', lastMessage.content?.length)
+      const questionData = detectStructuredQuestions(lastMessage.content)
+      if (questionData && !pendingQuestionData.value) {
+        console.log('[Questions] ✓ Detected questions in last message after send complete (fallback detection)')
+        pendingQuestionData.value = questionData
+        
+        // Also update the message content to remove the questions JSON
+        try {
+          const parsed = JSON.parse(lastMessage.content.trim())
+          if (parsed.content && typeof parsed.content === 'string') {
+            console.log('[Questions] Extracting content from nested JSON')
+            lastMessage.content = parsed.content
+          }
+        } catch (e) {
+          // Keep original if parsing fails
+          console.log('[Questions] Could not extract content:', e.message)
+        }
+      } else if (questionData) {
+        console.log('[Questions] Questions already set, skipping duplicate')
+      } else {
+        console.log('[Questions] No questions found in last message')
+      }
+    } else {
+      console.log('[Questions] Last message is not from agent or no messages')
+    }
+  }
+})
+
+// Watch for question data changes to persist state
+watch(pendingQuestionData, (newVal, oldVal) => {
+  console.log('[Questions] pendingQuestionData changed from', !!oldVal, 'to', !!newVal)
+  if (newVal) {
+    console.log('[Questions] Question data:', JSON.stringify(newVal, null, 2))
+  }
+  saveSessionState()
+})
 
 onMounted(async () => {
   await initializeSession()

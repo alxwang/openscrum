@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Callable, List
+from filelock import FileLock
 
 # Default storage root: $OPENSCRUM_DATA/storage or ~/.openscrum/storage
 _DATA_DIR = os.environ.get(
@@ -51,11 +52,13 @@ class Storage:
         return _key_path(key, self._dir)
 
     def write(self, key: List[str], value: Any) -> None:
-        """Write value at key. Overwrites if exists."""
+        """Write value at key. Overwrites if exists. Uses file locking."""
         path = self._path(key)
         _ensure_dir(path)
-        with open(path, "w") as f:
-            json.dump(value, f, indent=2)
+        lock_path = path + ".lock"
+        with FileLock(lock_path):
+            with open(path, "w") as f:
+                json.dump(value, f, indent=2)
 
     def read(self, key: List[str]) -> Any:
         """Read value at key. Raises NotFoundError if missing."""
@@ -67,22 +70,37 @@ class Storage:
             raise NotFoundError(f"Resource not found: {path}")
 
     def update(self, key: List[str], editor: Callable[[Any], None]) -> Any:
-        """Read, apply editor(draft), write back. Returns updated value."""
-        try:
-            content = self.read(key)
-        except NotFoundError:
-            content = {}
-        editor(content)
-        self.write(key, content)
+        """Read, apply editor(draft), write back. Returns updated value. Atomic with lock."""
+        path = self._path(key)
+        _ensure_dir(path)
+        lock_path = path + ".lock"
+        
+        with FileLock(lock_path):
+            try:
+                if os.path.exists(path):
+                    with open(path, "r") as f:
+                        content = json.load(f)
+                else:
+                    content = {}
+            except (FileNotFoundError, json.JSONDecodeError):
+                 content = {}
+            
+            editor(content)
+            
+            with open(path, "w") as f:
+                json.dump(content, f, indent=2)
+                
         return content
 
     def remove(self, key: List[str]) -> None:
-        """Remove key. No-op if not found."""
+        """Remove key. No-op if not found. Atomic with lock."""
         path = self._path(key)
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+        lock_path = path + ".lock"
+        with FileLock(lock_path):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
     def list(self, prefix: List[str]) -> List[List[str]]:
         """

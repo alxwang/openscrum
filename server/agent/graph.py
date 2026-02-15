@@ -205,18 +205,24 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
     Returns:
         AIMessage with content and tool_calls extracted from JSON
     """
-    # Extract content - if not present, serialize the entire JSON as a string
-    content = json_data.get("content", "")
-    
-    # Ensure content is always a string, never a dict
-    if isinstance(content, dict):
-        content = json.dumps(content, indent=2)
-    elif not content and json_data:
-        # If no content field but we have other data (e.g., steps), serialize it
-        content = json.dumps(json_data, indent=2)
-    elif not isinstance(content, str):
-        # Fallback: convert any other type to string
-        content = str(content)
+    # Special case: If JSON contains questions, preserve the entire JSON structure
+    # so the frontend can detect and display them
+    if "questions" in json_data and isinstance(json_data.get("questions"), dict):
+        # Return the full JSON as content so frontend receives the complete structure
+       content = json.dumps(json_data)
+    else:
+        # Extract content - if not present, serialize the entire JSON as a string
+        content = json_data.get("content", "")
+        
+        # Ensure content is always a string, never a dict
+        if isinstance(content, dict):
+            content = json.dumps(content, indent=2)
+        elif not content and json_data:
+            # If no content field but we have other data (e.g., steps), serialize it
+            content = json.dumps(json_data, indent=2)
+        elif not isinstance(content, str):
+            # Fallback: convert any other type to string
+            content = str(content)
     
     tool_calls_data = json_data.get("tool_calls", [])
 

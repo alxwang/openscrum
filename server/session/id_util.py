@@ -47,7 +47,11 @@ def generate_id(prefix_key: str, descending: bool = False, timestamp: float | No
     if descending:
         combined = 0xFFFFFF - (combined & 0xFFFFFF)
     time_hex = f"{combined:012x}"[-12:]
-    return f"{prefix}_{time_hex}{_random_base62(14)}"
+    
+    # Add PID to ensure uniqueness across processes/workers
+    pid_hex = f"{os.getpid() & 0xFFFF:04x}"
+    
+    return f"{prefix}_{time_hex}{pid_hex}{_random_base62(10)}"
 
 
 def ascending(prefix_key: str, given: str | None = None) -> str:
