@@ -50,9 +50,9 @@
         </div>
       </header>
 
-      <!-- Split View Container -->
+      <!-- Split View Container - 3 Panes -->
       <div v-if="!isInitializing && !showSessionSelector" class="flex-1 flex overflow-hidden split-container">
-        <!-- Left Pane - Chat -->
+        <!-- Left Pane - Chat (40%) -->
         <div class="flex flex-col border-r border-surface-dark" :style="{ width: leftPaneWidth + '%' }">
           <!-- Chat Messages Area -->
           <main class="flex-1 overflow-y-auto custom-scrollbar px-6 py-4">
@@ -74,14 +74,9 @@
                   message.role === 'user' ? 'message-user' : 'message-agent'
                 ]">
                   <div v-if="message.role === 'agent'" class="prose prose-invert max-w-none">
-                    <!-- Check if message contains progress JSON -->
-                    <template v-if="extractProgressData(message.content)">
-                      <ProgressTracker 
-                        :plan="extractProgressData(message.content).plan"
-                        :currentProgress="extractProgressData(message.content).current_progress"
-                      />
-                    </template>
-                    <div v-else v-html="marked.parse(formatMessageContent(message.content))"></div>
+                    <!-- Display text content (if any) -->
+                    <div v-if="extractDisplayContent(message.content)" 
+                         v-html="marked.parse(formatMessageContent(extractDisplayContent(message.content)))"></div>
                   </div>
                   <div v-else class="whitespace-pre-wrap">{{ message.content }}</div>
                 </div>
@@ -131,28 +126,69 @@
                   rows="5"
                   ref="inputRef"
                 ></textarea>
-                <button
-                  @click="sendMessage"
-                  :disabled="!inputMessage.trim() || isSending || !sessionId || pendingQuestionData"
-                  class="px-6 py-3 bg-accent hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium transition-colors self-end"
-                >
-                >
-                  Send
-                </button>
+                <div class="flex flex-col gap-2">
+                  <!-- Token Usage Indicator -->
+                  <TokenUsageIndicator 
+                    v-if="sessionId"
+                    :tokenCount="tokenUsage.tokenCount"
+                    :tokenLimit="tokenUsage.tokenLimit"
+                    :shouldCompress="tokenUsage.shouldCompress"
+                    :show="tokenUsage.tokenCount > 0"
+                  />
+                  <button
+                    @click="sendMessage"
+                    :disabled="!inputMessage.trim() || isSending || !sessionId || pendingQuestionData"
+                    class="px-6 py-3 bg-accent hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium transition-colors"
+                  >
+                    Send
+                  </button>
+                </div>
               </div>
             </div>
           </footer>
         </div>
 
-        <!-- Draggable Divider -->
+        <!-- Left Draggable Divider (between left and center) -->
         <div 
-          @mousedown="startDragging"
+          @mousedown="startDraggingLeft"
           class="w-1 bg-surface-dark hover:bg-accent cursor-col-resize transition-colors flex-shrink-0"
-          :class="{ 'bg-accent': isDragging }"
+          :class="{ 'bg-accent': isDraggingLeft }"
         ></div>
 
-        <!-- Right Pane - Split into top and bottom -->
-        <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth) + '%' }">
+        <!-- Center Pane - Progress/Plan Display (30%) -->
+        <div class="flex flex-col bg-surface/50 border-r border-surface-dark" :style="{ width: centerPaneWidth + '%' }">
+          <!-- Progress Tracker at Top (Edit Mode Only) -->
+          <div v-if="latestProgress && mode === 'edit'" class="p-4 overflow-y-auto custom-scrollbar">
+            <ProgressTracker 
+              :plan="latestProgress.plan"
+              :currentProgress="latestProgress.current_progress"
+            />
+          </div>
+          
+          <!-- Empty State / Mode Info -->
+          <div v-else class="flex items-center justify-center h-full text-text-muted px-4">
+            <div class="text-center">
+              <p class="text-sm" v-if="mode === 'plan'">
+                <span class="block font-medium text-text mb-2">Plan Mode</span>
+                Progress tracking disabled in planning mode.<br>
+                Switch to Edit mode to see execution progress.
+              </p>
+              <p class="text-sm" v-else>
+                Progress will appear here during execution
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Draggable Divider (between center and right) -->
+        <div 
+          @mousedown="startDraggingRight"
+          class="w-1 bg-surface-dark hover:bg-accent cursor-col-resize transition-colors flex-shrink-0"
+          :class="{ 'bg-accent': isDraggingRight }"
+        ></div>
+
+        <!-- Right Pane - Tools (30%) - Split into top and bottom -->
+        <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth - centerPaneWidth) + '%' }">
           <!-- Top Section - Tool List -->
           <div class="bg-surface/30 border-b border-surface-dark overflow-auto" :style="{ height: rightTopHeight + '%' }">
             <ToolList 
@@ -210,6 +246,7 @@ import SessionSelector from './components/SessionSelector.vue'
 import PermissionDialog from './components/PermissionDialog.vue'
 import QuestionDialog from './components/QuestionDialog.vue'
 import ProgressTracker from './components/ProgressTracker.vue'
+import TokenUsageIndicator from './components/TokenUsageIndicator.vue'
 import ToolList from './components/ToolList.vue'
 import ToolOutput from './components/ToolOutput.vue'
 import { marked } from 'marked'
@@ -227,6 +264,7 @@ const {
   replyToPermission,
   compressContext,
   resetContext,
+  getTokenUsage,
   sessionId,
   modelName 
 } = useApiClient()
@@ -251,15 +289,30 @@ const pendingQuestionData = ref(null)
 // States: 'idle' | 'thinking' | 'working' | 'waiting_permission' | 'executing_tool'
 const sessionState = ref('idle')
 
-// Resizable panes state
-const leftPaneWidth = ref(66.67) // 2/3 of screen width in percentage
-const isDragging = ref(false)
+// Latest progress/plan data (displayed in center pane)
+const latestProgress = ref(null)
+
+// Resizable panes state (3-pane layout)
+const leftPaneWidth = ref(40) // Left pane (chat) - 40%
+const centerPaneWidth = ref(30) // Center pane (empty for now) - 30%
+const isDraggingLeft = ref(false) // Dragging between left and center
+const isDraggingRight = ref(false) // Dragging between center and right
 const rightTopHeight = ref(33.33) // 1/3 of right pane height in percentage
 const isDraggingVertical = ref(false)
 
 // Tool execution tracking
 const toolExecutions = ref([])
 const selectedTool = ref(null)
+
+// Token usage tracking
+const tokenUsage = ref({
+  tokenCount: 0,
+  tokenLimit: 128000,
+  usagePercentage: 0,
+  shouldCompress: false,
+  model: '',
+  messageCount: 0,
+})
 
 // Display name: prefer session.title from server, fallback to 'Untitled Session'
 const sessionDisplayName = computed(() => {
@@ -348,6 +401,7 @@ const clearSessionState = () => {
     currentTool.value = null
     currentToolCommand.value = null
     pendingQuestionData.value = null
+    latestProgress.value = null
     console.log('[State] Cleared session state')
   } catch (error) {
     console.error('[State] Failed to clear state:', error)
@@ -390,29 +444,9 @@ const extractToolExecutions = (messageHistory) => {
 
 // Auto-calculate optimal chat pane width based on content
 const calculateOptimalChatWidth = () => {
-  // If there are tool executions, give more space to the right pane
-  if (toolExecutions.value.length > 0) {
-    // With tools: 60% chat, 40% for tools panel
-    return 60
-  }
-  
-  // If there are messages but no tool executions yet
-  if (messages.value.length > 0) {
-    // Calculate average message length to determine if we need more width
-    const totalLength = messages.value.reduce((sum, msg) => sum + (msg.content?.length || 0), 0)
-    const avgLength = totalLength / messages.value.length
-    
-    // If messages are long/complex (avg > 500 chars), give more space to chat
-    if (avgLength > 500) {
-      return 70
-    }
-    
-    // Medium complexity messages
-    return 66.67
-  }
-  
-  // Empty session or new session: default to 70% for chat
-  return 70
+  // For 3-pane layout, return default of 40% for left pane
+  // Center pane is always 30%, right pane gets the remaining 30%
+  return 40
 }
 
 // Configure marked for markdown rendering
@@ -429,6 +463,7 @@ marked.setOptions({
 const extractProgressData = (content) => {
   if (!content) return null
   
+  // First, try if the entire content is a progress JSON
   const trimmed = content.trim()
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
     try {
@@ -438,10 +473,287 @@ const extractProgressData = (content) => {
         return parsed
       }
     } catch (e) {
-      // Not valid JSON
+      // Not valid JSON, continue to check for embedded JSON
     }
   }
+  
+  // If entire content is not progress JSON, look for embedded JSON blocks
+  // Use a more robust approach: find all opening braces and try to parse from there
+  const lines = content.split('\n')
+  
+  // Look for potential JSON start positions (lines with just '{' or starting with '{')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (line.startsWith('{')) {
+      // Found a potential JSON start, extract from here to end
+      const jsonCandidate = lines.slice(i).join('\n')
+      
+      // Try to find the complete JSON object using brace counting
+      let braceCount = 0
+      let jsonEnd = -1
+      let inString = false
+      let escapeNext = false
+      
+      for (let j = 0; j < jsonCandidate.length; j++) {
+        const char = jsonCandidate[j]
+        
+        if (escapeNext) {
+          escapeNext = false
+          continue
+        }
+        
+        if (char === '\\') {
+          escapeNext = true
+          continue
+        }
+        
+        if (char === '"') {
+          inString = !inString
+          continue
+        }
+        
+        if (!inString) {
+          if (char === '{') {
+            braceCount++
+          } else if (char === '}') {
+            braceCount--
+            if (braceCount === 0) {
+              jsonEnd = j + 1
+              break
+            }
+          }
+        }
+      }
+      
+      if (jsonEnd > 0) {
+        const jsonStr = jsonCandidate.substring(0, jsonEnd)
+        try {
+          const parsed = JSON.parse(jsonStr)
+          // Check if it has the progress structure
+          if (parsed.plan && parsed.current_progress) {
+            return parsed
+          }
+        } catch (e) {
+          // Not valid JSON, continue to next potential start
+          continue
+        }
+      }
+    }
+  }
+  
   return null
+}
+
+// Helper to extract displayable content from a message
+// Returns null for progress data (shown in ProgressTracker)
+// Returns text content for questions data (questions shown in popup)
+// Returns original content otherwise
+const extractDisplayContent = (content) => {
+  if (!content) return ''
+  
+  // FIRST: Check if it's questions data (higher priority)
+  // Try to parse as JSON if it looks like JSON
+  const trimmed = content.trim()
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      
+      // Check for questions structure (nested format with content field)
+      // This is the format from plan mode: {"content": "...", "questions": {...}}
+      if (parsed.questions && typeof parsed.questions === 'object') {
+        const questionsData = parsed.questions
+        if (questionsData.type === 'questions' && Array.isArray(questionsData.questions)) {
+          // This is questions JSON! Return the content field for display
+          console.log('[Display] Detected questions JSON (nested format), extracting content field')
+          return parsed.content || ''
+        }
+      }
+      
+      // Also check for direct questions format (backward compatibility)
+      // Format: {"type": "questions", "questions": [...]}
+      if (parsed.type === 'questions' && Array.isArray(parsed.questions)) {
+        console.log('[Display] Detected questions JSON (direct format), no content field')
+        return '' // No content to display, only questions
+      }
+      
+      // Check for progress structure
+      // Progress JSON from edit mode: {"content": "...", "plan": {...}, "current_progress": {...}}
+      if (parsed.plan && parsed.current_progress) {
+        console.log('[Display] Detected progress JSON')
+        // If there's a content field with meaningful text, return it for chat display
+        // Progress tracker will show the plan/progress in center pane
+        if (parsed.content && typeof parsed.content === 'string' && parsed.content.trim()) {
+          console.log('[Display] Progress JSON has content field, extracting for display')
+          return parsed.content
+        }
+        // Otherwise don't display anything in chat (progress only in center pane)
+        console.log('[Display] Progress JSON without content, returning null')
+        return null
+      }
+    } catch (e) {
+      console.log('[Display] JSON parse failed:', e.message, 'First 100 chars:', trimmed.substring(0, 100))
+      // Continue to other checks
+    }
+  }
+  
+  // Check if it's progress data embedded in text
+  const progressData = extractProgressData(content)
+  if (progressData) {
+    // If progress JSON is embedded, find and remove it, return the remaining text
+    const lines = content.split('\n')
+    
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim()
+      if (line.startsWith('{')) {
+        const jsonCandidate = lines.slice(i).join('\n')
+        
+        // Find the complete JSON object using brace counting
+        let braceCount = 0
+        let jsonEnd = -1
+        let inString = false
+        let escapeNext = false
+        
+        for (let j = 0; j < jsonCandidate.length; j++) {
+          const char = jsonCandidate[j]
+          
+          if (escapeNext) {
+            escapeNext = false
+            continue
+          }
+          
+          if (char === '\\') {
+            escapeNext = true
+            continue
+          }
+          
+          if (char === '"') {
+            inString = !inString
+            continue
+          }
+          
+          if (!inString) {
+            if (char === '{') {
+              braceCount++
+            } else if (char === '}') {
+              braceCount--
+              if (braceCount === 0) {
+                jsonEnd = j + 1
+                break
+              }
+            }
+          }
+        }
+        
+        if (jsonEnd > 0) {
+          const jsonStr = jsonCandidate.substring(0, jsonEnd)
+          try {
+            const parsed = JSON.parse(jsonStr)
+            if (parsed.plan && parsed.current_progress) {
+              // Found the progress JSON, remove it and return the text before it
+              const textLines = lines.slice(0, i)
+              const textContent = textLines.join('\n').trim()
+              return textContent || null
+            }
+          } catch (e) {
+            continue
+          }
+        }
+      }
+    }
+    
+    return null
+  }
+  
+  // Check if it's questions data embedded in text
+  const questionData = detectStructuredQuestions(content)
+  if (questionData) {
+    // Questions found - extract content field from JSON
+    try {
+      // Try to parse the trimmed content
+      const trimmed = content.trim()
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        const parsed = JSON.parse(trimmed)
+        // Return the content field if it exists
+        if (parsed.content) {
+          console.log('[Display] Extracted content field from questions JSON')
+          return parsed.content
+        }
+      }
+    } catch (e) {
+      console.log('[Display] Failed to extract content from questions JSON:', e.message)
+    }
+    
+    // If embedded in text, find and remove questions JSON, return remaining text
+    const lines = content.split('\n')
+    
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim()
+      if (line.startsWith('{')) {
+        const jsonCandidate = lines.slice(i).join('\n')
+        
+        // Find the complete JSON object using brace counting
+        let braceCount = 0
+        let jsonEnd = -1
+        let inString = false
+        let escapeNext = false
+        
+        for (let j = 0; j < jsonCandidate.length; j++) {
+          const char = jsonCandidate[j]
+          
+          if (escapeNext) {
+            escapeNext = false
+            continue
+          }
+          
+          if (char === '\\') {
+            escapeNext = true
+            continue
+          }
+          
+          if (char === '"') {
+            inString = !inString
+            continue
+          }
+          
+          if (!inString) {
+            if (char === '{') {
+              braceCount++
+            } else if (char === '}') {
+              braceCount--
+              if (braceCount === 0) {
+                jsonEnd = j + 1
+                break
+              }
+            }
+          }
+        }
+        
+        if (jsonEnd > 0) {
+          const jsonStr = jsonCandidate.substring(0, jsonEnd)
+          try {
+            const parsed = JSON.parse(jsonStr)
+            // Check if this is questions JSON
+            const isQuestions = (parsed.type === 'questions' && Array.isArray(parsed.questions)) ||
+                               (parsed.questions?.type === 'questions' && Array.isArray(parsed.questions?.questions))
+            
+            if (isQuestions) {
+              // Found the questions JSON, remove it and return the text before it
+              const textLines = lines.slice(0, i)
+              const textContent = textLines.join('\n').trim()
+              return textContent || ''
+            }
+          } catch (e) {
+            continue
+          }
+        }
+      }
+    }
+    
+    return ''
+  }
+  
+  // Regular content - return as-is
+  return content
 }
 
 // Helper to format message content - wrap JSON in code blocks
@@ -452,6 +764,10 @@ const formatMessageContent = (content) => {
   if (extractProgressData(content)) {
     return '' // Return empty string, we'll handle it separately
   }
+  
+  // NOTE: Questions JSON is handled by extractDisplayContent, which extracts
+  // the content field. formatMessageContent should only receive the markdown content,
+  // not the raw questions JSON. No need for special handling here.
   
   // Check if content looks like JSON (starts with { or [, and contains proper JSON structure)
   const trimmed = content.trim()
@@ -481,44 +797,112 @@ const detectStructuredQuestions = (content) => {
     return null
   }
   
-  // Try to parse as JSON
+  // First, try if the entire content is a questions JSON
   const trimmed = content.trim()
   console.log('[Questions] Trimmed content starts with {?', trimmed.startsWith('{'), 'ends with }?', trimmed.endsWith('}'))
   
-  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
-    console.log('[Questions] Content is not JSON-like, returning null')
-    return null
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      console.log('[Questions] Attempting to parse entire content as JSON...')
+      const parsed = JSON.parse(trimmed)
+      console.log('[Questions] Successfully parsed JSON, keys:', Object.keys(parsed))
+      
+      // Check if it has the questions structure directly
+      if (parsed.type === 'questions' && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+        console.log('[Questions] ✓ Detected structured questions (direct format):', parsed)
+        return parsed
+      }
+      
+      // Check if questions are nested under a 'questions' property
+      if (parsed.questions && typeof parsed.questions === 'object') {
+        console.log('[Questions] Found nested questions property, checking structure...')
+        const questionsData = parsed.questions
+        console.log('[Questions] questionsData type:', questionsData.type, 'has questions array?', Array.isArray(questionsData.questions))
+        
+        if (questionsData.type === 'questions' && Array.isArray(questionsData.questions) && questionsData.questions.length > 0) {
+          console.log('[Questions] ✓ Detected structured questions (nested format):', questionsData)
+          return questionsData
+        }
+      }
+    } catch (e) {
+      console.log('[Questions] Failed to parse entire content as JSON:', e.message)
+      // Continue to check for embedded JSON
+    }
   }
   
-  try {
-    console.log('[Questions] Attempting to parse JSON...')
-    const parsed = JSON.parse(trimmed)
-    console.log('[Questions] Successfully parsed JSON, keys:', Object.keys(parsed))
-    
-    // Check if it has the questions structure directly
-    if (parsed.type === 'questions' && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
-      console.log('[Questions] ✓ Detected structured questions (direct format):', parsed)
-      return parsed
-    }
-    
-    // Check if questions are nested under a 'questions' property
-    if (parsed.questions && typeof parsed.questions === 'object') {
-      console.log('[Questions] Found nested questions property, checking structure...')
-      const questionsData = parsed.questions
-      console.log('[Questions] questionsData type:', questionsData.type, 'has questions array?', Array.isArray(questionsData.questions))
+  // If entire content is not questions JSON, look for embedded JSON blocks
+  console.log('[Questions] Looking for embedded questions JSON...')
+  const lines = content.split('\n')
+  
+  // Look for potential JSON start positions (lines with just '{' or starting with '{')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (line.startsWith('{')) {
+      // Found a potential JSON start, extract from here to end
+      const jsonCandidate = lines.slice(i).join('\n')
       
-      if (questionsData.type === 'questions' && Array.isArray(questionsData.questions) && questionsData.questions.length > 0) {
-        console.log('[Questions] ✓ Detected structured questions (nested format):', questionsData)
-        return questionsData
-      } else {
-        console.log('[Questions] Nested questions object does not match expected structure')
+      // Try to find the complete JSON object using brace counting
+      let braceCount = 0
+      let jsonEnd = -1
+      let inString = false
+      let escapeNext = false
+      
+      for (let j = 0; j < jsonCandidate.length; j++) {
+        const char = jsonCandidate[j]
+        
+        if (escapeNext) {
+          escapeNext = false
+          continue
+        }
+        
+        if (char === '\\') {
+          escapeNext = true
+          continue
+        }
+        
+        if (char === '"') {
+          inString = !inString
+          continue
+        }
+        
+        if (!inString) {
+          if (char === '{') {
+            braceCount++
+          } else if (char === '}') {
+            braceCount--
+            if (braceCount === 0) {
+              jsonEnd = j + 1
+              break
+            }
+          }
+        }
       }
-    } else {
-      console.log('[Questions] No questions property found or it is not an object')
+      
+      if (jsonEnd > 0) {
+        const jsonStr = jsonCandidate.substring(0, jsonEnd)
+        try {
+          const parsed = JSON.parse(jsonStr)
+          
+          // Check if it has the questions structure directly
+          if (parsed.type === 'questions' && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+            console.log('[Questions] ✓ Detected embedded structured questions (direct format)')
+            return parsed
+          }
+          
+          // Check if questions are nested
+          if (parsed.questions && typeof parsed.questions === 'object') {
+            const questionsData = parsed.questions
+            if (questionsData.type === 'questions' && Array.isArray(questionsData.questions) && questionsData.questions.length > 0) {
+              console.log('[Questions] ✓ Detected embedded structured questions (nested format)')
+              return questionsData
+            }
+          }
+        } catch (e) {
+          // Not valid JSON, continue to next potential start
+          continue
+        }
+      }
     }
-  } catch (e) {
-    // Not valid JSON or not questions structure
-    console.log('[Questions] Failed to parse JSON:', e.message)
   }
   
   console.log('[Questions] No questions detected, returning null')
@@ -543,6 +927,34 @@ const handleQuestionSkip = () => {
 
 const toggleMode = () => {
   mode.value = mode.value === 'plan' ? 'edit' : 'plan'
+}
+
+const fetchTokenUsage = async () => {
+  if (!sessionId.value) {
+    tokenUsage.value = {
+      tokenCount: 0,
+      tokenLimit: 128000,
+      usagePercentage: 0,
+      shouldCompress: false,
+      model: '',
+      messageCount: 0,
+    }
+    return
+  }
+  
+  try {
+    const data = await getTokenUsage(sessionId.value)
+    tokenUsage.value = {
+      tokenCount: data.token_count || 0,
+      tokenLimit: data.token_limit || 128000,
+      usagePercentage: data.usage_percentage || 0,
+      shouldCompress: data.should_compress || false,
+      model: data.model || '',
+      messageCount: data.message_count || 0,
+    }
+  } catch (error) {
+    console.error('Failed to fetch token usage:', error)
+  }
 }
 
 const handleCompressContext = async () => {
@@ -601,6 +1013,9 @@ const handleCompressContext = async () => {
     // Recalculate optimal width
     leftPaneWidth.value = calculateOptimalChatWidth()
     
+    // Update token usage after compression
+    await fetchTokenUsage()
+    
     await nextTick()
     scrollToBottom()
     alert('Context compressed successfully!')
@@ -630,6 +1045,9 @@ const handleResetContext = async () => {
     // Reset pane width to default
     leftPaneWidth.value = calculateOptimalChatWidth()
     
+    // Update token usage after reset
+    await fetchTokenUsage()
+    
     alert('Context reset successfully!')
   } catch (error) {
     console.error('Failed to reset context:', error)
@@ -637,29 +1055,64 @@ const handleResetContext = async () => {
   }
 }
 
-// Resizable pane handlers
-const startDragging = () => {
-  isDragging.value = true
-  document.addEventListener('mousemove', handleDrag)
-  document.addEventListener('mouseup', stopDragging)
+// Resizable pane handlers for 3-pane layout
+// Left divider (between left and center panes)
+const startDraggingLeft = () => {
+  isDraggingLeft.value = true
+  document.addEventListener('mousemove', handleDragLeft)
+  document.addEventListener('mouseup', stopDraggingLeft)
   document.body.style.cursor = 'col-resize'
   document.body.style.userSelect = 'none'
 }
 
-const handleDrag = (e) => {
-  if (!isDragging.value) return
+const handleDragLeft = (e) => {
+  if (!isDraggingLeft.value) return
   const container = document.querySelector('.split-container')
   if (!container) return
   const containerWidth = container.offsetWidth
   const newWidth = (e.clientX / containerWidth) * 100
-  // Constrain between 30% and 80%
-  leftPaneWidth.value = Math.max(30, Math.min(80, newWidth))
+  // Constrain left pane between 20% and 60%
+  leftPaneWidth.value = Math.max(20, Math.min(60, newWidth))
 }
 
-const stopDragging = () => {
-  isDragging.value = false
-  document.removeEventListener('mousemove', handleDrag)
-  document.removeEventListener('mouseup', stopDragging)
+const stopDraggingLeft = () => {
+  isDraggingLeft.value = false
+  document.removeEventListener('mousemove', handleDragLeft)
+  document.removeEventListener('mouseup', stopDraggingLeft)
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+}
+
+// Right divider (between center and right panes)
+const startDraggingRight = () => {
+  isDraggingRight.value = true
+  document.addEventListener('mousemove', handleDragRight)
+  document.addEventListener('mouseup', stopDraggingRight)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
+
+const handleDragRight = (e) => {
+  if (!isDraggingRight.value) return
+  const container = document.querySelector('.split-container')
+  if (!container) return
+  const containerWidth = container.offsetWidth
+  const mouseX = (e.clientX / containerWidth) * 100
+  
+  // Calculate new center width (distance from left pane end to mouse position)
+  const newCenterWidth = mouseX - leftPaneWidth.value
+  
+  // Constrain center pane between 15% and 50%
+  // Also ensure right pane has at least 20%
+  const minCenter = 15
+  const maxCenter = Math.min(50, 100 - leftPaneWidth.value - 20)
+  centerPaneWidth.value = Math.max(minCenter, Math.min(maxCenter, newCenterWidth))
+}
+
+const stopDraggingRight = () => {
+  isDraggingRight.value = false
+  document.removeEventListener('mousemove', handleDragRight)
+  document.removeEventListener('mouseup', stopDraggingRight)
   document.body.style.cursor = ''
   document.body.style.userSelect = ''
 }
@@ -832,6 +1285,14 @@ const sendMessage = async () => {
           currentToolCommand.value = null
           
           if (finalContent) {
+            // Check for progress/plan data and store it separately
+            console.log('[Progress] Checking for progress data in final content...')
+            const progressData = extractProgressData(finalContent)
+            if (progressData) {
+              console.log('[Progress] Found progress data, storing in center pane')
+              latestProgress.value = progressData
+            }
+            
             // Check if the agent returned structured questions
             console.log('[Questions] Checking for questions in final content...')
             const questionData = detectStructuredQuestions(finalContent)
@@ -881,6 +1342,8 @@ const sendMessage = async () => {
   } finally {
     isSending.value = false
     inputRef.value?.focus()
+    // Update token usage after sending message
+    await fetchTokenUsage()
   }
 }
 
@@ -942,7 +1405,8 @@ const handleExitSession = () => {
   toolExecutions.value = []
   selectedTool.value = null
   pendingQuestionData.value = null
-  leftPaneWidth.value = 70 // Reset to default width
+  leftPaneWidth.value = 40 // Reset to default width
+  centerPaneWidth.value = 30 // Reset center pane
   showSessionSelector.value = true
 }
 
@@ -994,6 +1458,23 @@ const handleSelectSession = async (id) => {
       // Restore session state (thinking indicator, etc.) - DO THIS FIRST
       restoreSessionState()
       
+      // Extract latest progress data from messages
+      if (messages.value.length > 0) {
+        console.log('[Progress] Checking loaded messages for progress data...')
+        // Check from last to first to find the most recent progress
+        for (let i = messages.value.length - 1; i >= 0; i--) {
+          const msg = messages.value[i]
+          if (msg.role === 'agent') {
+            const progressData = extractProgressData(msg.content)
+            if (progressData) {
+              console.log('[Progress] Found progress data in message', i)
+              latestProgress.value = progressData
+              break // Use the most recent progress
+            }
+          }
+        }
+      }
+      
       // Check if the last message contains questions (if not already restored from state)
       if (!pendingQuestionData.value && messages.value.length > 0) {
         const lastMessage = messages.value[messages.value.length - 1]
@@ -1020,11 +1501,15 @@ const handleSelectSession = async (id) => {
     } catch (error) {
       console.error('Failed to load message history:', error)
       messages.value = []
-      leftPaneWidth.value = 70
+      leftPaneWidth.value = 40
+      centerPaneWidth.value = 30
     }
     
     await nextTick()
     scrollToBottom()
+    
+    // Fetch token usage after loading messages
+    await fetchTokenUsage()
   } catch (error) {
     console.error('Failed to select session:', error)
     alert('Failed to load session: ' + error.message)
@@ -1041,12 +1526,16 @@ const handleCreateSession = (payload) => {
   toolExecutions.value = []
   selectedTool.value = null
   pendingQuestionData.value = null
+  latestProgress.value = null
   
   // Clear state for new session
   clearSessionState()
   
   // Auto-calculate optimal chat pane width for new session
   leftPaneWidth.value = calculateOptimalChatWidth()
+  
+  // Reset token usage for new session
+  fetchTokenUsage()
 }
 
 const initializeSession = async () => {
@@ -1096,6 +1585,23 @@ const initializeSession = async () => {
           // Restore session state (thinking indicator, etc.) - DO THIS FIRST
           restoreSessionState()
           
+          // Extract latest progress data from messages
+          if (messages.value.length > 0) {
+            console.log('[Progress] Checking loaded messages for progress data (init)...')
+            // Check from last to first to find the most recent progress
+            for (let i = messages.value.length - 1; i >= 0; i--) {
+              const msg = messages.value[i]
+              if (msg.role === 'agent') {
+                const progressData = extractProgressData(msg.content)
+                if (progressData) {
+                  console.log('[Progress] Found progress data in message', i, '(init)')
+                  latestProgress.value = progressData
+                  break // Use the most recent progress
+                }
+              }
+            }
+          }
+          
           // Check if the last message contains questions (if not already restored from state)
           if (!pendingQuestionData.value && messages.value.length > 0) {
             const lastMessage = messages.value[messages.value.length - 1]
@@ -1122,10 +1628,14 @@ const initializeSession = async () => {
           
           await nextTick()
           scrollToBottom()
+          
+          // Fetch token usage after loading messages
+          await fetchTokenUsage()
         } catch (error) {
           console.error('Failed to load message history:', error)
           messages.value = []
-          leftPaneWidth.value = 70
+          leftPaneWidth.value = 40
+          centerPaneWidth.value = 30
         }
       } catch (error) {
         // Session doesn't exist, clear it and show selector

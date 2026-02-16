@@ -220,6 +220,24 @@ export function useApiClient() {
     }
   }
 
+  const getTokenUsage = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}/token-usage`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to get token usage:', error)
+      // Return default values on error
+      return {
+        token_count: 0,
+        token_limit: 128000,
+        usage_percentage: 0,
+        should_compress: false,
+        model: 'gpt-4',
+        message_count: 0,
+      }
+    }
+  }
+
   return {
     health,
     listSessions,
@@ -232,6 +250,7 @@ export function useApiClient() {
     replyToPermission,
     compressContext,
     resetContext,
+    getTokenUsage,
     sessionId,
     modelName,
   }

@@ -114,7 +114,7 @@ class Session:
         workspace_name: Optional[str] = None,
         parent_id: Optional[str] = None,
         title: Optional[str] = None,
-        permission: Optional[dict] = None,
+        permission: Optional[list] = None,
         id: Optional[str] = None,
     ) -> SessionInfo:
         """

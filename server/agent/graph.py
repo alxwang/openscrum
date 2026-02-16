@@ -23,6 +23,11 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
+try:
+    from openai import BadRequestError
+except ImportError:
+    BadRequestError = None
+
 from .prompt_registry import PromptRegistry
 try:
     from server.instruction import system as instruction_system
@@ -205,13 +210,20 @@ def create_ai_message_from_json(json_data: Dict[str, Any], original_response: AI
     Returns:
         AIMessage with content and tool_calls extracted from JSON
     """
-    # Special case: If JSON contains questions, preserve the entire JSON structure
-    # so the frontend can detect and display them
+    # Special cases: If JSON contains questions OR progress, preserve the entire JSON structure
+    # Use the ORIGINAL response content (not re-serialized) to avoid double-escaping
+    
+    # Case 1: Questions JSON (from plan mode)
     if "questions" in json_data and isinstance(json_data.get("questions"), dict):
-        # Return the full JSON as content so frontend receives the complete structure
-       content = json.dumps(json_data)
+        content = str(original_response.content) if hasattr(original_response, 'content') else json.dumps(json_data)
+    
+    # Case 2: Progress JSON (from edit mode) - has both plan and current_progress
+    elif "plan" in json_data and "current_progress" in json_data:
+        # Frontend needs the full structure to display progress tracker
+        content = str(original_response.content) if hasattr(original_response, 'content') else json.dumps(json_data)
+    
     else:
-        # Extract content - if not present, serialize the entire JSON as a string
+        # Regular content extraction
         content = json_data.get("content", "")
         
         # Ensure content is always a string, never a dict
@@ -293,8 +305,19 @@ def planner_node(
     All responses are parsed as JSON.
     AGENTS.md / CLAUDE.md (project + global) are appended to system prompt.
     """
+    # Get user's intended mode from initial state 
+    user_mode = state.get("mode", "plan")
+    
     # Get plan mode prompt with context injection and JSON enforcement
     system_prompt = registry.get_prompt("PLAN_MODE_SYSTEM_REMINDER", force_json=True)
+    
+    # Add strong mode reminder at the top
+    mode_reminder = f"\n\n<CRITICAL_MODE_CONSTRAINT>\nUSER SELECTED MODE: {user_mode.upper()}\n"
+    if user_mode == "plan":
+        mode_reminder += "You are in PLAN MODE - READ-ONLY. NO file edits, NO system changes, NO tool executions (except read-only tools). This is ABSOLUTE and overrides all other instructions.\n"
+    mode_reminder += "</CRITICAL_MODE_CONSTRAINT>\n\n"
+    system_prompt = mode_reminder + system_prompt
+    
     if workspace_root:
         parts = instruction_system(workspace_root)
         if parts:
@@ -311,10 +334,38 @@ def planner_node(
         MessagesPlaceholder(variable_name="messages"),
     ])
     
-    # Call LLM (no tools in plan mode)
+    # Call LLM (no tools in plan mode) - catch context length errors
     chain = prompt | llm.with_config({"run_name": "planner"})
     
-    response = chain.invoke({"messages": messages})
+    try:
+        response = chain.invoke({"messages": messages})
+    except Exception as e:
+        # Check if it's a context length exceeded error
+        error_msg = str(e)
+        if BadRequestError and isinstance(e, BadRequestError):
+            if "context_length_exceeded" in error_msg or "tokens exceed" in error_msg.lower():
+                # Return a helpful message to the user
+                error_response = AIMessage(
+                    content=json.dumps({
+                        "content": "**Context Length Exceeded**\n\nThe conversation history has become too long "
+                                   f"({error_msg.split('resulted in ')[1].split(' ')[0] if 'resulted in' in error_msg else 'exceeded'} tokens). "
+                                   "Please use the **Compress Context** button to summarize older messages and continue.\n\n"
+                                   "The Compress Context feature will:\n"
+                                   "- Keep your recent messages intact\n"
+                                   "- Summarize older conversation history\n"
+                                   "- Allow you to continue working\n\n"
+                                   "After compressing, you can send your message again."
+                    }),
+                    tool_calls=[]
+                )
+                return {
+                    "messages": [error_response],
+                    # Don't overwrite mode - preserve user's choice
+                    # "mode": "plan",  # REMOVED
+                    "scratchpad": state.get("scratchpad", "") + "\n[ERROR] Context length exceeded",
+                }
+        # Re-raise if it's not a context length error
+        raise
     
     # Parse JSON response
     content = str(response.content) if hasattr(response, 'content') else ""
@@ -331,7 +382,8 @@ def planner_node(
     # Update state
     return {
         "messages": [parsed_response],
-        "mode": "plan",
+        # Don't overwrite mode - let user's choice persist
+        # "mode": "plan",  # REMOVED - was overwriting user's mode choice
         "scratchpad": state.get("scratchpad", "") + f"\n[PLAN] {scratchpad_content[:200]}...",
     }
 
@@ -350,13 +402,56 @@ def editor_node(
     AGENTS.md / CLAUDE.md (project + global) are appended to system prompt.
     Includes execution progress reporting instructions.
     """
+    # Get user's intended mode from initial state
+    user_mode = state.get("mode", "edit")
+    
     # Get editor mode prompt with context injection and JSON enforcement
     # Using BEAST_PROVIDER_SYSTEM as the main system prompt for edit mode
     system_prompt = registry.get_prompt("BEAST_PROVIDER_SYSTEM", force_json=True)
     
-    # Add execution progress reporting instructions
+    # Add CRITICAL progress reporting requirement at the TOP (before everything else)
+    progress_critical = """\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<MANDATORY_PROGRESS_REPORTING>
+🚨 CRITICAL REQUIREMENT - NON-NEGOTIABLE 🚨
+
+After EVERY SINGLE tool execution, you MUST provide a progress update in this EXACT JSON format:
+
+{
+  "plan": {
+    "1": "Step 1 description",
+    "2": "Step 2 description",
+    "3": "Step 3 description"
+  },
+  "current_progress": {
+    "step": 2,
+    "status": "What was just completed",
+    "next_step": "What you will do next"
+  }
+}
+
+WITHOUT THIS PROGRESS UPDATE, THE USER CANNOT SEE WHAT YOU'RE DOING.
+This is NOT optional - it is REQUIRED after EVERY tool call.
+Progress reports help users understand your execution flow.
+</MANDATORY_PROGRESS_REPORTING>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"""
+    system_prompt = progress_critical + system_prompt
+    
+    # Add mode reminder 
+    mode_reminder = f"\n\n<MODE_CONTEXT>\nUSER SELECTED MODE: {user_mode.upper()}\n"
+    if user_mode == "edit":
+        mode_reminder += "You are in EDIT/BUILD MODE - You CAN make file edits and execute tools to implement solutions.\n"
+    mode_reminder += "</MODE_CONTEXT>\n\n"
+    system_prompt = system_prompt + mode_reminder
+    
+    # Add execution progress reporting instructions (detailed version)
     execution_progress_prompt = registry.get_prompt("EXECUTION_PROGRESS_SYSTEM_REMINDER", force_json=False)
     system_prompt = system_prompt.rstrip() + "\n\n" + execution_progress_prompt
+    
+    # Add ANOTHER reminder at the end for emphasis
+    progress_reminder_end = """\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔄 REMINDER: After EACH tool execution → Provide progress JSON update
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"""
+    system_prompt = system_prompt.rstrip() + progress_reminder_end
     
     if workspace_root:
         parts = instruction_system(workspace_root)
@@ -378,9 +473,37 @@ def editor_node(
         MessagesPlaceholder(variable_name="messages"),
     ])
     
-    # Call LLM with tools
+    # Call LLM with tools - catch context length errors
     chain = prompt | llm_with_tools
-    response = chain.invoke({"messages": messages})
+    try:
+        response = chain.invoke({"messages": messages})
+    except Exception as e:
+        # Check if it's a context length exceeded error
+        error_msg = str(e)
+        if BadRequestError and isinstance(e, BadRequestError):
+            if "context_length_exceeded" in error_msg or "tokens exceed" in error_msg.lower():
+                # Return a helpful message to the user
+                error_response = AIMessage(
+                    content=json.dumps({
+                        "content": "**Context Length Exceeded**\n\nThe conversation history has become too long "
+                                   f"({error_msg.split('resulted in ')[1].split(' ')[0] if 'resulted in' in error_msg else 'exceeded'} tokens). "
+                                   "Please use the **Compress Context** button to summarize older messages and continue.\n\n"
+                                   "The Compress Context feature will:\n"
+                                   "- Keep your recent messages intact\n"
+                                   "- Summarize older conversation history\n"
+                                   "- Allow you to continue working\n\n"
+                                   "After compressing, you can send your message again."
+                    }),
+                    tool_calls=[]
+                )
+                return {
+                    "messages": [error_response],
+                    # Don't overwrite mode - preserve user's choice
+                    # "mode": "edit",  # REMOVED
+                    "scratchpad": state.get("scratchpad", "") + "\n[ERROR] Context length exceeded",
+                }
+        # Re-raise if it's not a context length error
+        raise
     
     # Parse JSON response if it contains JSON
     content = str(response.content) if hasattr(response, 'content') else ""
@@ -406,7 +529,8 @@ def editor_node(
     
     return {
         "messages": [parsed_response],
-        "mode": "edit",
+        # Don't overwrite mode - let user's choice persist
+        # "mode": "edit",  # REMOVED - was overwriting user's mode choice
         "scratchpad": state.get("scratchpad", "") + f"\n[EDIT] {scratchpad_content}...",
     }
 
@@ -425,58 +549,40 @@ def _is_approval_phrase(content: str) -> bool:
 
 def route_entry(state: AgentState) -> Literal["planner", "editor"]:
     """
-    Entry router: start at editor when user is approving an existing plan OR when mode is explicitly "edit".
+    Entry router: STRICTLY routes based on user's mode choice.
     
-    If the last message is a user approval and the previous is an assistant message
-    (the plan), go straight to editor so the agent uses tools instead of asking
-    "which plan?". Also route to editor if initial mode is "edit".
-    Otherwise start at planner.
+    - mode="plan" → always routes to planner (read-only, planning only)
+    - mode="edit" → always routes to editor (execution with tools)
+    
+    NOTE: Mode is determined by user's UI selection and NEVER changes based on 
+    message content or approval phrases. User must explicitly toggle mode in UI.
     """
-    # Check if mode is explicitly set to "edit" - skip planning and go straight to editor
-    if state.get("mode") == "edit":
-        return "editor"
+    # Strictly enforce user's mode choice - no automatic transitions
+    mode = state.get("mode", "plan")
     
-    messages = state["messages"]
-    if len(messages) < 2:
+    if mode == "edit":
+        return "editor"
+    else:
         return "planner"
-    last = messages[-1]
-    prev = messages[-2]
-    if isinstance(last, HumanMessage) and isinstance(prev, AIMessage):
-        content = (last.content or "").strip().lower()
-        if _is_approval_phrase(content):
-            return "editor"
-    return "planner"
 
 
 def should_continue_to_editor(state: AgentState) -> Literal["editor", END]:
     """
-    Route function: determines if plan is approved and should move to editor.
+    Route function from planner node.
     
-    Checks if the last message indicates plan approval or contains edit instructions.
+    In PLAN mode: ALWAYS return END (stay in planning, never transition to editor)
+    In EDIT mode: This should never be called (edit mode routes directly to editor)
+    
+    Mode transitions ONLY happen when user explicitly toggles mode in UI.
     """
-    messages = state["messages"]
-    if not messages:
+    # In plan mode, planner always ends - never transition to editor
+    # User must toggle to edit mode in UI to use editor
+    if state.get("mode") == "plan":
         return END
     
-    last_message = messages[-1]
-    
-    # Check for explicit approval keywords
-    if isinstance(last_message, AIMessage):
-        content = last_message.content.lower() if hasattr(last_message, 'content') else ""
-        if any(keyword in content for keyword in ["approved", "ready to implement", "start editing", "begin implementation"]):
-            return "editor"
-    
-    # Check for user approval
-    if isinstance(last_message, HumanMessage):
-        content = (last_message.content or "").strip().lower()
-        if _is_approval_phrase(content):
-            return "editor"
-    
-    # Default: stay in plan mode or end
-    if state.get("mode") == "plan":
-        return END  # Plan mode complete, need explicit approval
-    
-    return "editor"  # Already in edit mode or transitioning
+    # This branch should not be reached (edit mode goes straight to editor)
+    # But if somehow we're here in edit mode, go to editor
+    return "editor"
 
 
 def should_call_tools(state: AgentState) -> Literal["tools", "editor", END]:

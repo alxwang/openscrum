@@ -127,9 +127,17 @@ class MemSearchAdapter(Storage):
                         embedding_model = os.getenv("OPENSCRUM_MEMSEARCH_EMBEDDING_MODEL", "text-embedding-3-small")
                         _log.info(f"Initializing memsearch with model: {embedding_model}, memory_dir: {self._memory_dir}")
                         
+                        # Configure max_chunk_size based on model token limits
+                        # text-embedding-3-small has 8192 token limit
+                        # Conservative estimate: 1 token ≈ 0.75 chars for typical text, less for code/JSON
+                        # Safe max: ~800 chars should stay well under 8192 tokens (~1000-2000 tokens)
+                        chunk_size = int(os.getenv("OPENSCRUM_MEMSEARCH_CHUNK_SIZE", "800"))
+                        _log.info(f"Using chunk size: {chunk_size} chars (to stay within embedding model token limits)")
+                        
                         self._memsearch = MemSearch(
                             paths=[self._memory_dir],
-                            embedding_model=embedding_model
+                            embedding_model=embedding_model,
+                            max_chunk_size=chunk_size
                         )
                         _log.info(f"✓ Memsearch initialized successfully with {embedding_model}")
                         # Trigger initial indexing
@@ -152,7 +160,19 @@ class MemSearchAdapter(Storage):
                 _log.debug("Memory indexing complete")
             except Exception as e:
                 import logging
-                logging.error(f"Failed to index memories: {e}")
+                error_msg = str(e)
+                
+                # Check for token limit errors from embedding API
+                if "maximum context length" in error_msg or "tokens" in error_msg.lower():
+                    logging.error(
+                        f"Failed to index memories - text chunk too large for embedding model: {e}\n"
+                        f"Solutions:\n"
+                        f"  1. Set a smaller chunk size: OPENSCRUM_MEMSEARCH_CHUNK_SIZE=500 (default: 800)\n"
+                        f"  2. Use a model with larger token limit: OPENSCRUM_MEMSEARCH_EMBEDDING_MODEL=text-embedding-ada-002\n"
+                        f"  3. Check for files with very large code blocks or JSON without paragraph breaks"
+                    )
+                else:
+                    logging.error(f"Failed to index memories: {e}")
 
     def _trigger_indexing(self):
         """Trigger background indexing with rate limiting (safe to call from sync context)."""

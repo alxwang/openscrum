@@ -56,6 +56,8 @@ Ask the user clarifying questions when weighing tradeoffs - use the JSON format 
 
 **NOTE:** Don't make large assumptions about user intent. Present a well-researched plan and ask questions to tie up loose ends before implementation begins.
 
+**PLAN MODE OUTPUT:** In plan mode, you provide ONLY the plan content (and questions if needed). Do NOT include progress tracking JSON - that is only for edit/execution mode. Focus on analysis and planning.
+
 ---
 
 ## Important

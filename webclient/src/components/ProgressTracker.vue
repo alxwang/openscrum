@@ -44,8 +44,13 @@
           <!-- Current Step Status -->
           <div v-if="parseInt(stepNum) === currentStep && status" class="mt-1.5">
             <div class="flex items-start gap-2">
-              <div class="animate-spin h-3 w-3 border-2 border-accent border-t-transparent rounded-full mt-0.5 flex-shrink-0"></div>
-              <p class="text-xs text-accent">{{ status }}</p>
+              <div v-if="isActiveStatus" class="animate-spin h-3 w-3 border-2 border-accent border-t-transparent rounded-full mt-0.5 flex-shrink-0"></div>
+              <div v-else class="h-3 w-3 mt-0.5 flex-shrink-0 flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <p class="text-xs" :class="isActiveStatus ? 'text-accent' : 'text-green-500'">{{ status }}</p>
             </div>
             <p v-if="nextStep" class="text-xs text-text-muted mt-1 ml-5">
               Next: {{ nextStep }}
@@ -99,6 +104,29 @@ const sortedSteps = computed(() => {
 const currentStep = computed(() => props.currentProgress.step || 0)
 const status = computed(() => props.currentProgress.status || '')
 const nextStep = computed(() => props.currentProgress.next_step || '')
+
+// Check if status indicates active work (should show spinner) or completion (no spinner)
+const isActiveStatus = computed(() => {
+  if (!status.value) return false
+  
+  const statusLower = status.value.toLowerCase()
+  
+  // Words that indicate completion (no spinner)
+  const completionWords = ['succeeded', 'completed', 'finished', 'ready', 'done', 'built successfully', 'success']
+  if (completionWords.some(word => statusLower.includes(word))) {
+    return false
+  }
+  
+  // Words that indicate active work (show spinner)
+  const activeWords = ['working', 'building', 'processing', 'executing', 'running', 'installing', 'compiling']
+  if (activeWords.some(word => statusLower.includes(word))) {
+    return true
+  }
+  
+  // Default: if there's a status and it's not a completion status, assume it's active
+  // unless it's very short (like a summary)
+  return statusLower.length > 5
+})
 
 const totalSteps = computed(() => Object.keys(props.plan).length)
 const completedSteps = computed(() => Math.max(0, currentStep.value - 1))

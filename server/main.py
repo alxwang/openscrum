@@ -28,6 +28,12 @@ try:
 except ImportError:
     pass
 
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +44,11 @@ from langchain_anthropic import ChatAnthropic
 
 from server.agent.graph import create_agent, AgentState
 from server.agent.prompt_registry import PromptRegistry
+from server.token_counter import (
+    count_message_tokens,
+    get_token_limit,
+    should_compress,
+)
 
 # Configure logging so our permission/tool logs are visible when running uvicorn
 logging.basicConfig(
@@ -261,6 +272,55 @@ def get_agent(workspace_root: str = None) -> object:
     workspace = workspace_root or WORKSPACE_ROOT
     llm = create_llm()
     return create_agent(llm, workspace_root=workspace)
+
+
+# ============================================================================
+# Default Permissions
+# ============================================================================
+
+def get_default_workspace_permissions() -> list[dict]:
+    """
+    Get default permission rules for workspace operations.
+    
+    Pre-approves safe read and write operations within the workspace,
+    while requiring explicit approval for potentially dangerous operations.
+    
+    Returns:
+        List of permission rule dicts for session creation
+    """
+    return [
+        # Auto-approve safe read operations
+        {"permission": "list", "pattern": "*", "action": "allow"},
+        {"permission": "read", "pattern": "*", "action": "allow"},
+        {"permission": "grep", "pattern": "*", "action": "allow"},
+        {"permission": "glob", "pattern": "*", "action": "allow"},
+        
+        # Auto-approve file editing (core agent functionality)
+        {"permission": "edit", "pattern": "*", "action": "allow"},
+        
+        # Auto-approve code intelligence operations
+        {"permission": "codesearch", "pattern": "*", "action": "allow"},
+        {"permission": "lsp", "pattern": "*", "action": "allow"},
+        
+        # Auto-approve reading the todo list
+        {"permission": "todoread", "pattern": "*", "action": "allow"},
+        
+        # Require approval for shell commands (can modify system)
+        {"permission": "bash", "pattern": "*", "action": "ask"},
+        
+        # Require approval for external access
+        {"permission": "webfetch", "pattern": "*", "action": "ask"},
+        {"permission": "websearch", "pattern": "*", "action": "ask"},
+        
+        # Require approval for user interaction
+        {"permission": "question", "pattern": "*", "action": "ask"},
+        
+        # Require approval for subtasks (separate permission scope)
+        {"permission": "task", "pattern": "*", "action": "ask"},
+        
+        # Require approval for modifying the plan
+        {"permission": "todowrite", "pattern": "*", "action": "ask"},
+    ]
 
 
 # ============================================================================
@@ -801,7 +861,8 @@ if SESSION_AVAILABLE:
             session = session_svc.create(
                 directory=directory,
                 title=title,
-                parent_id=parent_id
+                parent_id=parent_id,
+                permission=get_default_workspace_permissions()
             )
             return dict(session)
         else:
@@ -815,7 +876,8 @@ if SESSION_AVAILABLE:
             session = session_svc.create(
                 workspace_name=workspace_name or title,
                 title=title,
-                parent_id=parent_id
+                parent_id=parent_id,
+                permission=get_default_workspace_permissions()
             )
             # Return as explicit dict so FastAPI serializes title correctly
             return dict(session)
@@ -950,6 +1012,48 @@ if SESSION_AVAILABLE:
             _log = logging.getLogger(__name__)
             _log.error(f"Failed to compress context: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to compress context: {str(e)}")
+    
+    @app.get("/sessions/{session_id}/token-usage", summary="Get token usage for session")
+    async def get_token_usage(session_id: str):
+        """
+        Get current token usage for the session.
+        Returns token count, limit, percentage, and whether compression is recommended.
+        """
+        try:
+            session_svc = get_session()
+            
+            # Get session to verify it exists
+            try:
+                session = session_svc.get(session_id)
+            except NotFoundError:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            
+            # Get model from environment or default
+            model = os.getenv("OPENAI_MODEL", "gpt-4")
+            
+            # Get all messages
+            messages = session_svc.messages(session_id=session_id)
+            
+            # Count tokens
+            token_count = count_message_tokens(messages, model)
+            token_limit = get_token_limit(model)
+            usage_percentage = round((token_count / token_limit) * 100, 1)
+            should_compress_now = should_compress(token_count, model, threshold=0.8)
+            
+            return {
+                "token_count": token_count,
+                "token_limit": token_limit,
+                "usage_percentage": usage_percentage,
+                "should_compress": should_compress_now,
+                "model": model,
+                "message_count": len(messages),
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            _log = logging.getLogger(__name__)
+            _log.error(f"Failed to get token usage: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to get token usage: {str(e)}")
     
     @app.post("/sessions/{session_id}/reset", summary="Reset session context")
     async def reset_session_context(session_id: str):
@@ -1092,6 +1196,7 @@ if SESSION_AVAILABLE:
         Send a message to a session, streaming the AI response.
         Loads conversation history and maintains context.
         """
+        _log = logging.getLogger(__name__)
         try:
             session_svc = get_session()
             
@@ -1142,11 +1247,70 @@ if SESSION_AVAILABLE:
                 }
                 session_svc.update_part(text_part)
                 
-                # 6. Convert previous messages to LangChain format
+                # 6. Auto-compression if context is too large
+                model = os.getenv("OPENAI_MODEL") or os.getenv("OPENSCRUM_MODEL", "gpt-5-mini")
+                token_count = count_message_tokens(previous_messages, model)
+                _log.info(f"Current token count: {token_count}, model: {model}")
+                
+                if should_compress(token_count, model, threshold=0.8):
+                    _log.info(f"Auto-compressing context (token count: {token_count} >= 80% of limit)")
+                    
+                    # Perform compression similar to /compress endpoint
+                    if len(previous_messages) > 5:
+                        recent_messages = previous_messages[:5]  # Already newest first
+                        old_messages = previous_messages[5:]
+                        
+                        # Create summary
+                        summary_parts = []
+                        for msg in reversed(old_messages):  # Chronological order
+                            info = msg.get("info", {})
+                            role = info.get("role", "unknown")
+                            parts = msg.get("parts", [])
+                            text_parts = [p.get("text", "") for p in parts if p.get("type") == "text"]
+                            if text_parts:
+                                content = " ".join(text_parts)[:150]  # Truncate
+                                summary_parts.append(f"{role}: {content}...")
+                        
+                        summary_text = f"[Auto-compressed {len(old_messages)} older messages to save context]\n" + "\n".join(summary_parts[:8])
+                        
+                        # Delete old messages
+                        for msg in old_messages:
+                            msg_id = msg.get("info", {}).get("id")
+                            if msg_id:
+                                try:
+                                    session_svc.remove_message(session_id, msg_id)
+                                except Exception as e:
+                                    _log.warning(f"Failed to remove message {msg_id}: {e}")
+                        
+                        # Create summary message
+                        summary_msg_id = ascending("message")
+                        now_ms = int(time.time() * 1000)
+                        summary_message = {
+                            "id": summary_msg_id,
+                            "role": "assistant",
+                            "session_id": session_id,
+                            "time": {"created": now_ms},
+                        }
+                        session_svc.update_message(summary_message)
+                        
+                        # Save summary text part
+                        text_part_summary = {
+                            "id": ascending("part"),
+                            "type": "text",
+                            "session_id": session_id,
+                            "message_id": summary_msg_id,
+                            "text": summary_text,
+                        }
+                        session_svc.update_part(text_part_summary)
+                        
+                        # Reload messages after compression
+                        previous_messages = session_svc.messages(session_id=session_id)
+                        _log.info(f"Auto-compression complete: {len(old_messages)} messages compressed, {len(recent_messages) + 1} remaining")
+                
+                # 7. Convert previous messages to LangChain format
                 langchain_messages = messages_to_langchain(previous_messages)
                 
-                # 6.5. RECALL - Search semantic memory for relevant context (memsearch integration)
-                _log = logging.getLogger(__name__)
+                # 8. RECALL - Search semantic memory for relevant context (memsearch integration)
                 memory_context = None
                 storage = get_storage()
                 
@@ -1262,9 +1426,15 @@ if SESSION_AVAILABLE:
                 }
 
                 # 8. Stream response and save assistant message (with permission context)
+                # For sessions without permission rules, apply default workspace permissions
+                session_permissions = session.get("permission")
+                if not session_permissions:
+                    _log.info(f"Session {session_id} has no permission rules, applying defaults")
+                    session_permissions = get_default_workspace_permissions()
+                
                 inner_stream = stream_agent_response_with_save(
                     agent, initial_state, session_id, workspace_root, user_message_id,
-                    session_permission_ruleset=session.get("permission") or [],
+                    session_permission_ruleset=session_permissions,
                 )
                 project_id = session.get("project_id", "default")
 
