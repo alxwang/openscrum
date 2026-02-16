@@ -73,11 +73,12 @@
 
               <!-- Messages - All aligned left -->
               <div
-                v-for="(message, index) in messages"
+                v-for="(message, index) in displayMessages"
                 :key="index"
                 class="flex justify-start"
               >
                 <div 
+                  v-if="message.hasContent"
                   :class="[
                     'max-w-[85%]',
                     message.role === 'user' ? 'message-user' : 'message-agent',
@@ -87,11 +88,9 @@
                   title="Double-click to copy"
                 >
                   <div v-if="message.role === 'agent'" class="prose prose-invert max-w-none">
-                    <!-- Display text content (if any) -->
-                    <div v-if="extractDisplayContent(message.content)" 
-                         v-html="marked.parse(formatMessageContent(extractDisplayContent(message.content)))"></div>
+                    <div v-html="marked.parse(formatMessageContent(message.displayContent))"></div>
                   </div>
-                  <div v-else class="whitespace-pre-wrap">{{ message.content }}</div>
+                  <div v-else class="whitespace-pre-wrap">{{ message.displayContent }}</div>
                 </div>
               </div>
               
@@ -318,6 +317,29 @@ const {
 const mode = ref('plan')
 const inputMessage = ref('')
 const messages = ref([])
+
+// Computed property for displaying messages (avoid calling extractDisplayContent multiple times)
+const displayMessages = computed(() => {
+  console.log('[DisplayMessages] Computing display messages, count:', messages.value.length)
+  return messages.value.map((msg, index) => {
+    if (msg.role === 'agent') {
+      console.log(`[DisplayMessages] Processing agent message ${index}, content length:`, msg.content?.length, 'starts with:', msg.content?.substring(0, 50))
+      const displayContent = extractDisplayContent(msg.content)
+      console.log(`[DisplayMessages] Message ${index} display content length:`, displayContent?.length, 'has content:', !!displayContent && displayContent.trim() !== '')
+      return {
+        ...msg,
+        displayContent: displayContent || '', // Store processed content
+        hasContent: !!displayContent && displayContent.trim() !== ''
+      }
+    }
+    return {
+      ...msg,
+      displayContent: msg.content,
+      hasContent: true
+    }
+  })
+})
+
 const isThinking = ref(false)
 const thinkingMessage = ref('Thinking...')
 const currentTool = ref(null)
@@ -614,6 +636,7 @@ const extractDisplayContent = (content) => {
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
     try {
       const parsed = JSON.parse(trimmed)
+      console.log('[Display] Successfully parsed JSON, keys:', Object.keys(parsed).join(', '))
       
       // IMPORTANT: Remove any tool_calls field if present (should not be in content JSON)
       if (parsed.tool_calls) {
@@ -655,9 +678,94 @@ const extractDisplayContent = (content) => {
         console.log('[Display] Progress JSON without content, returning null')
         return null
       }
+      
+      // If we got here, it's valid JSON but not a known structure
+      // Try to extract a content field if one exists
+      if (parsed.content && typeof parsed.content === 'string') {
+        console.log('[Display] Unknown JSON structure with content field, extracting content')
+        return parsed.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+      }
+      
+      // If no content field, it's JSON we don't want to display
+      console.log('[Display] JSON without content field, hiding from display. Keys:', Object.keys(parsed).join(', '))
+      return ''
     } catch (e) {
       console.error('[Display] JSON parse failed:', e.message, 'First 200 chars:', trimmed.substring(0, 200))
-      // If JSON parsing fails, return the original content (it's not JSON)
+      
+      // Try to extract JSON using brace counting (handle malformed/truncated JSON)
+      try {
+        let braceCount = 0
+        let inString = false
+        let escapeNext = false
+        let jsonEnd = -1
+        
+        for (let i = 0; i < trimmed.length; i++) {
+          const char = trimmed[i]
+          
+          if (escapeNext) {
+            escapeNext = false
+            continue
+          }
+          
+          if (char === '\\') {
+            escapeNext = true
+            continue
+          }
+          
+          if (char === '"') {
+            inString = !inString
+            continue
+          }
+          
+          if (!inString) {
+            if (char === '{') {
+              braceCount++
+            } else if (char === '}') {
+              braceCount--
+              if (braceCount === 0) {
+                jsonEnd = i + 1
+                break
+              }
+            }
+          }
+        }
+        
+        if (jsonEnd > 0) {
+          const validJson = trimmed.substring(0, jsonEnd)
+          console.log('[Display] Extracted valid JSON portion, length:', validJson.length)
+          const parsed = JSON.parse(validJson)
+          
+          // Remove tool_calls if present
+          if (parsed.tool_calls) {
+            console.warn('[Display] Found and removed tool_calls from extracted JSON')
+            delete parsed.tool_calls
+          }
+          
+          // Try to extract content field
+          if (parsed.content && typeof parsed.content === 'string') {
+            console.log('[Display] Extracted content field from repaired JSON')
+            return parsed.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+          }
+          
+          // Check for questions
+          if (parsed.questions && typeof parsed.questions === 'object') {
+            const questionsData = parsed.questions
+            if (questionsData.type === 'questions' && Array.isArray(questionsData.questions)) {
+              console.log('[Display] Found questions in repaired JSON, extracting content')
+              const contentText = parsed.content || ''
+              return contentText.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+            }
+          }
+          
+          console.log('[Display] Repaired JSON has no content field, hiding')
+          return ''
+        }
+      } catch (e2) {
+        console.error('[Display] Failed to repair JSON:', e2.message)
+      }
+      
+      // If all parsing attempts fail, return as-is
+      // (might be text that happens to have { and } characters)
       return content
     }
   }
@@ -831,25 +939,9 @@ const formatMessageContent = (content) => {
     return '' // Return empty string, we'll handle it separately
   }
   
-  // NOTE: Questions JSON is handled by extractDisplayContent, which extracts
-  // the content field. formatMessageContent should only receive the markdown content,
-  // not the raw questions JSON. No need for special handling here.
-  
-  // Check if content looks like JSON (starts with { or [, and contains proper JSON structure)
-  const trimmed = content.trim()
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || 
-      (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try {
-      // Try to parse as JSON
-      const parsed = JSON.parse(trimmed)
-      // If successful, wrap in markdown code block
-      const formatted = JSON.stringify(parsed, null, 2)
-      return '```json\n' + formatted + '\n```'
-    } catch (e) {
-      // Not valid JSON, return as-is
-      return content
-    }
-  }
+  // NOTE: All JSON structures should already be handled by extractDisplayContent.
+  // If we see JSON here, just return it as-is (don't hide it, don't format it)
+  // extractDisplayContent should have already decided what to show
   
   return content
 }
@@ -982,12 +1074,45 @@ const detectStructuredQuestions = (content) => {
 }
 
 const handleQuestionSubmit = async (answersObj) => {
+  // Save question data before clearing it
+  const questionData = pendingQuestionData.value
   pendingQuestionData.value = null
   
-  // Format answers as JSON string for the agent
-  const answersText = 'Here are my answers:\n```json\n' + JSON.stringify(answersObj, null, 2) + '\n```'
+  // Format answers in a user-friendly way
+  let answersText = '## My Answers\n\n'
   
-  // Send the answers as a new user message
+  if (questionData && questionData.questions) {
+    // Map through questions to show question text with answers
+    questionData.questions.forEach(q => {
+      const answer = answersObj[q.id]
+      if (answer !== undefined && answer !== null && answer !== '') {
+        answersText += `**${q.question}**\n`
+        
+        // Format based on answer type
+        if (Array.isArray(answer)) {
+          // Multichoice - show as bullet list
+          answersText += answer.map(a => `- ${a}`).join('\n') + '\n\n'
+        } else {
+          // Single value - show as simple text
+          answersText += `${answer}\n\n`
+        }
+      }
+    })
+  } else {
+    // Fallback if no question data available
+    answersText = 'Here are my answers:\n\n'
+    Object.entries(answersObj).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        if (Array.isArray(value)) {
+          answersText += `**${key}:** ${value.join(', ')}\n\n`
+        } else {
+          answersText += `**${key}:** ${value}\n\n`
+        }
+      }
+    })
+  }
+  
+  // Send the formatted answers as a new user message
   inputMessage.value = answersText
   await sendMessage()
 }
@@ -1103,11 +1228,12 @@ const copyMessageToClipboard = async (message, index, event) => {
   let textToCopy = ''
   
   if (message.role === 'agent') {
-    // For agent messages, extract display content (without JSON data)
-    textToCopy = extractDisplayContent(message.content)
+    // For agent messages, use displayContent if available (from computed property)
+    // Otherwise extract display content from raw content
+    textToCopy = message.displayContent || extractDisplayContent(message.content)
   } else {
-    // For user messages, use content as-is
-    textToCopy = message.content
+    // For user messages, use displayContent or content
+    textToCopy = message.displayContent || message.content
   }
   
   if (!textToCopy || !textToCopy.trim()) {
@@ -1449,9 +1575,11 @@ const sendMessage = async () => {
           // Update or create agent message (only if we have content)
           if (agentContent && agentContent.trim()) {
             const lastMessage = messages.value[messages.value.length - 1]
-            if (lastMessage && lastMessage.role === 'agent' && !currentToolName) {
+            if (lastMessage && lastMessage.role === 'agent') {
+              // Update existing agent message
               lastMessage.content = agentContent
-            } else {
+            } else if (!currentToolName) {
+              // Only create new message if not currently executing tools
               messages.value.push({
                 role: 'agent',
                 content: agentContent,
@@ -1608,14 +1736,18 @@ const sendMessage = async () => {
             if (displayContent && displayContent.trim()) {
               const lastMessage = messages.value[messages.value.length - 1]
               if (lastMessage && lastMessage.role === 'agent') {
+                // Update existing agent message (from token streaming)
+                console.log('[Stream] Updating existing agent message with final content')
                 lastMessage.content = displayContent
-              } else {
-                // If no agent message exists yet (e.g., buffered JSON with no token chunks),
-                // create one now with the display content
+              } else if (agentContent === '') {
+                // Only create new message if no tokens were streamed (buffered JSON response)
+                console.log('[Stream] Creating new agent message for buffered JSON response')
                 messages.value.push({
                   role: 'agent',
                   content: displayContent,
                 })
+              } else {
+                console.log('[Stream] Skipping message creation (already exists from token streaming)')
               }
             } else {
               console.log('[Stream] Skipping blank message (no content to display)')
@@ -1808,6 +1940,12 @@ const handleSelectSession = async (id) => {
     
     // Fetch token usage after loading messages
     await fetchTokenUsage()
+    
+    // Fetch design documents if in plan mode
+    if (mode.value === 'plan') {
+      console.log('[Design] Loading design documents after session select (mode is plan)')
+      await fetchDesignDocuments()
+    }
   } catch (error) {
     console.error('Failed to select session:', error)
     alert('Failed to load session: ' + error.message)
@@ -1834,6 +1972,12 @@ const handleCreateSession = (payload) => {
   
   // Reset token usage for new session
   fetchTokenUsage()
+  
+  // Load design documents if in plan mode
+  if (mode.value === 'plan') {
+    console.log('[Design] Loading design documents for new session (mode is plan)')
+    fetchDesignDocuments()
+  }
 }
 
 const initializeSession = async () => {
@@ -1929,6 +2073,12 @@ const initializeSession = async () => {
           
           // Fetch token usage after loading messages
           await fetchTokenUsage()
+          
+          // Fetch design documents if in plan mode
+          if (mode.value === 'plan') {
+            console.log('[Design] Loading design documents on init (mode is plan)')
+            await fetchDesignDocuments()
+          }
         } catch (error) {
           console.error('Failed to load message history:', error)
           messages.value = []
