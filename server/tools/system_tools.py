@@ -1181,6 +1181,193 @@ In production, this would connect to the appropriate LSP server and return:
 
 
 # ============================================================================
+# Design Document Tools (Plan Mode)
+# ============================================================================
+
+
+@tool
+def design_create(doc_type: str) -> str:
+    """
+    Create a new design document from template.
+    
+    Available document types:
+    - functionalities: Feature list and functional requirements
+    - tech_stack: Technology choices and justifications
+    - database_design: Data models, schema, and relationships
+    - user_flow: User journeys and interaction patterns
+    - architecture: System architecture and component design
+    - api_design: API endpoints, request/response formats
+    - requirements: Business and technical requirements
+    
+    Args:
+        doc_type: Type of document to create (one of the types above)
+    
+    Returns:
+        Confirmation message with document path
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+    
+    from server.design_docs import DesignDocumentManager, DESIGN_DOC_TYPES
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+    
+    _log.info(f"[design_create] workspace_root={workspace_root}, doc_type={doc_type}")
+    
+    if doc_type not in DESIGN_DOC_TYPES:
+        available = ", ".join(DESIGN_DOC_TYPES.keys())
+        return f"Error: Unknown document type '{doc_type}'. Available types: {available}"
+    
+    manager = DesignDocumentManager(workspace_root)
+    doc_path = manager.get_doc_path(doc_type)
+    doc_info = DESIGN_DOC_TYPES[doc_type]
+    
+    # Check if document already exists
+    if doc_path.exists():
+        _log.info(f"[design_create] Document already exists at: {doc_path}")
+        return f"✓ {doc_info['name']} document already exists at: {doc_path}\n\nDocument was created previously. Use design_read to view it or design_write to update it."
+    
+    # Create new document
+    manager.create_document(doc_type)
+    _log.info(f"[design_create] Created NEW document at: {doc_path}")
+    
+    return f"✓ Created {doc_info['name']} document at: {doc_path}\n\nYou can now read and update this document using design_read and design_write tools."
+
+
+@tool
+def design_read(doc_type: str) -> str:
+    """
+    Read a design document.
+    
+    Args:
+        doc_type: Type of document to read (functionalities, tech_stack, database_design, user_flow, architecture, api_design, requirements)
+    
+    Returns:
+        Document content or error message
+    """
+    from server.design_docs import DesignDocumentManager, DESIGN_DOC_TYPES
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+    
+    if doc_type not in DESIGN_DOC_TYPES:
+        available = ", ".join(DESIGN_DOC_TYPES.keys())
+        return f"Error: Unknown document type '{doc_type}'. Available types: {available}"
+    
+    manager = DesignDocumentManager(workspace_root)
+    content = manager.read_document(doc_type)
+    
+    if content is None:
+        return f"Document '{doc_type}' does not exist yet. Use design_create to create it."
+    
+    return content
+
+
+@tool
+def design_write(doc_type: str, content: str) -> str:
+    """
+    Write/update a design document with new content.
+    
+    Args:
+        doc_type: Type of document to write
+        content: New content for the document (markdown format)
+    
+    Returns:
+        Confirmation message
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+    
+    from server.design_docs import DesignDocumentManager, DESIGN_DOC_TYPES
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+    
+    _log.info(f"[design_write] workspace_root={workspace_root}, doc_type={doc_type}, content_length={len(content)}")
+    
+    if doc_type not in DESIGN_DOC_TYPES:
+        available = ", ".join(DESIGN_DOC_TYPES.keys())
+        return f"Error: Unknown document type '{doc_type}'. Available types: {available}"
+    
+    manager = DesignDocumentManager(workspace_root)
+    doc_path = manager.write_document(doc_type, content)
+    
+    _log.info(f"[design_write] Wrote {len(content)} chars to: {doc_path}")
+    
+    return f"✓ Updated {DESIGN_DOC_TYPES[doc_type]['name']} document at: {doc_path}"
+
+
+@tool
+def design_list() -> str:
+    """
+    List all design documents and their status.
+    
+    Returns:
+        JSON string with document information
+    """
+    import json
+    from server.design_docs import DesignDocumentManager
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+    
+    manager = DesignDocumentManager(workspace_root)
+    docs = manager.list_documents()
+    
+    # Format as readable text
+    result = "Design Documents:\n\n"
+    for doc_type, info in docs.items():
+        status = "✓ Created" if info["exists"] else "○ Not created"
+        result += f"{status} {info['name']} ({doc_type})\n"
+        result += f"   {info['description']}\n"
+        if info["exists"] and info["last_modified"]:
+            result += f"   Last modified: {info['last_modified']}\n"
+        result += "\n"
+    
+    return result
+
+
+@tool
+def design_update_section(doc_type: str, section: str, content: str) -> str:
+    """
+    Update a specific section of a design document without rewriting the entire document.
+    
+    Args:
+        doc_type: Type of document to update
+        section: Section heading to update (e.g., "Frontend", "Core Features")
+        content: New content for that section
+    
+    Returns:
+        Confirmation message
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+    
+    from server.design_docs import DesignDocumentManager, DESIGN_DOC_TYPES
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+    
+    _log.info(f"[design_update_section] workspace_root={workspace_root}, doc_type={doc_type}, section={section}, content_length={len(content)}")
+    
+    if doc_type not in DESIGN_DOC_TYPES:
+        available = ", ".join(DESIGN_DOC_TYPES.keys())
+        return f"Error: Unknown document type '{doc_type}'. Available types: {available}"
+    
+    manager = DesignDocumentManager(workspace_root)
+    manager.update_section(doc_type, section, content)
+    
+    _log.info(f"[design_update_section] Updated section '{section}' in {doc_type}")
+    
+    return f"✓ Updated section '{section}' in {DESIGN_DOC_TYPES[doc_type]['name']} document"
+
+
 # Plan Tools (Plan Mode Entry/Exit)
 # ============================================================================
 
@@ -1258,6 +1445,11 @@ __all__ = [
     'codesearch',
     'batch',
     'lsp',
+    'design_create',
+    'design_read',
+    'design_write',
+    'design_list',
+    'design_update_section',
     'plan_exit',
     'plan_enter',
 ]

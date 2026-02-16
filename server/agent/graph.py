@@ -13,6 +13,7 @@ import asyncio
 import os
 import json
 import re
+import logging
 from pathlib import Path
 from typing import TypedDict, List, Literal, Dict, Any, Optional, Callable
 from typing_extensions import Annotated
@@ -38,6 +39,7 @@ from ..tools.system_tools import (
     grep, glob, list_files, bash, webfetch,
     todowrite, todoread, question,
     task, websearch, codesearch, batch, lsp,
+    design_create, design_read, design_write, design_list, design_update_section,
     plan_exit, plan_enter,
     __all__ as TOOL_NAMES,
 )
@@ -91,6 +93,46 @@ def get_tools(workspace_root: str = None):
         codesearch,
         batch,
         lsp,
+        design_create,
+        design_read,
+        design_write,
+        design_list,
+        design_update_section,
+        plan_exit,
+        plan_enter,
+    ]
+    try:
+        from server.tools.permission_layer import wrap_tool_with_permission
+        root = workspace_root or ""
+        return [wrap_tool_with_permission(t, workspace_root=root) for t in base]
+    except ImportError:
+        try:
+            from tools.permission_layer import wrap_tool_with_permission
+            root = workspace_root or ""
+            return [wrap_tool_with_permission(t, workspace_root=root) for t in base]
+        except ImportError:
+            return base
+
+
+def get_plan_mode_tools(workspace_root: str = None):
+    """Get safe tools for plan mode: design tools + read-only tools only."""
+    base = [
+        # Read-only tools
+        read,
+        grep,
+        glob,
+        list_files,
+        webfetch,
+        todoread,
+        websearch,
+        codesearch,
+        # Design document tools (plan mode specific)
+        design_create,
+        design_read,
+        design_write,
+        design_list,
+        design_update_section,
+        # Mode navigation
         plan_exit,
         plan_enter,
     ]
@@ -299,12 +341,16 @@ def planner_node(
     workspace_root: str = None,
 ) -> AgentState:
     """
-    Planner node - generates a plan without executing tools.
+    Planner node - generates plans and can call design + read-only tools.
     
-    Uses PLAN_MODE_SYSTEM_REMINDER prompt and operates in read-only mode.
+    Uses PLAN_MODE_SYSTEM_REMINDER prompt with access to safe tools.
     All responses are parsed as JSON.
     AGENTS.md / CLAUDE.md (project + global) are appended to system prompt.
     """
+    import logging
+    _log = logging.getLogger(__name__)
+    _log.info("[PLANNER NODE] Invoked - message count: %d", len(state.get("messages", [])))
+    
     # Get user's intended mode from initial state 
     user_mode = state.get("mode", "plan")
     
@@ -314,7 +360,7 @@ def planner_node(
     # Add strong mode reminder at the top
     mode_reminder = f"\n\n<CRITICAL_MODE_CONSTRAINT>\nUSER SELECTED MODE: {user_mode.upper()}\n"
     if user_mode == "plan":
-        mode_reminder += "You are in PLAN MODE - READ-ONLY. NO file edits, NO system changes, NO tool executions (except read-only tools). This is ABSOLUTE and overrides all other instructions.\n"
+        mode_reminder += "You are in PLAN MODE - You CAN call design tools and read-only tools. NO file edits, NO system changes. This is ABSOLUTE and overrides all other instructions.\n"
     mode_reminder += "</CRITICAL_MODE_CONSTRAINT>\n\n"
     system_prompt = mode_reminder + system_prompt
     
@@ -328,17 +374,25 @@ def planner_node(
     # Build messages
     messages = state["messages"]
 
+    # Bind plan mode tools (design tools + read-only tools)
+    tools = get_plan_mode_tools(workspace_root)
+    llm_with_tools = llm.bind_tools(tools).with_config({"run_name": "planner"})
+
     # Create prompt with system message
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         MessagesPlaceholder(variable_name="messages"),
     ])
     
-    # Call LLM (no tools in plan mode) - catch context length errors
-    chain = prompt | llm.with_config({"run_name": "planner"})
+    # Call LLM with tools - catch context length errors
+    chain = prompt | llm_with_tools
     
+    _log.info("[PLANNER NODE] Calling LLM with %d messages", len(messages))
     try:
         response = chain.invoke({"messages": messages})
+        _log.info("[PLANNER NODE] LLM response received - content length: %d, tool_calls: %d", 
+                  len(str(response.content)) if hasattr(response, 'content') else 0,
+                  len(getattr(response, 'tool_calls', [])))
     except Exception as e:
         # Check if it's a context length exceeded error
         error_msg = str(e)
@@ -367,24 +421,30 @@ def planner_node(
         # Re-raise if it's not a context length error
         raise
     
-    # Parse JSON response
-    content = str(response.content) if hasattr(response, 'content') else ""
-    json_data = parse_json_response(content)
-    parsed_response = create_ai_message_from_json(json_data, response)
-    
-    # Extract content for scratchpad - ensure it's a string
-    scratchpad_content = json_data.get('content', '')
-    if isinstance(scratchpad_content, dict):
-        scratchpad_content = json.dumps(scratchpad_content)
+    # Use response directly if it has valid tool_calls (LangChain format)
+    raw_tool_calls = getattr(response, "tool_calls", None)
+    if isinstance(raw_tool_calls, list) and raw_tool_calls:
+        # LLM made proper tool calls - use response as-is
+        parsed_response = response
     else:
-        scratchpad_content = str(scratchpad_content)
+        # Parse JSON response for questions/content
+        content = str(response.content) if hasattr(response, 'content') else ""
+        json_data = parse_json_response(content)
+        parsed_response = create_ai_message_from_json(json_data, response)
+    
+    # Extract content for scratchpad
+    content_str = str(parsed_response.content) if hasattr(parsed_response, 'content') else ""
+    scratchpad_content = content_str[:200] if content_str else "(tool calls)"
+    
+    _log.info("[PLANNER NODE] Returning - content length: %d, first 100 chars: %s", 
+              len(content_str), content_str[:100])
     
     # Update state
     return {
         "messages": [parsed_response],
         # Don't overwrite mode - let user's choice persist
         # "mode": "plan",  # REMOVED - was overwriting user's mode choice
-        "scratchpad": state.get("scratchpad", "") + f"\n[PLAN] {scratchpad_content[:200]}...",
+        "scratchpad": state.get("scratchpad", "") + f"\n[PLAN] {scratchpad_content}...",
     }
 
 
@@ -566,6 +626,61 @@ def route_entry(state: AgentState) -> Literal["planner", "editor"]:
         return "planner"
 
 
+def should_call_tools_from_planner(state: AgentState) -> Literal["tools", END]:
+    """
+    Route function from planner node - check if tools should be called.
+    
+    Prevents infinite loops by checking if tools were just executed.
+    """
+    from langchain_core.messages import ToolMessage
+    
+    messages = state["messages"]
+    if not messages:
+        return END
+    
+    last_message = messages[-1]
+    
+    # Check for tool calls
+    if isinstance(last_message, AIMessage):
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            # Before executing tools, check if we just executed the same tools
+            # Look for ToolMessages in the last 20 messages
+            recent_tool_messages = [
+                msg for msg in messages[-20:] 
+                if isinstance(msg, ToolMessage)
+            ]
+            
+            # If we have recent tool executions and the LLM is trying to call tools again,
+            # check if it's calling the SAME tools (likely infinite loop)
+            if recent_tool_messages:
+                # Count how many design_create calls we've made recently
+                # Look for the specific success pattern "✓ Created" to avoid counting design_list
+                design_create_count = sum(
+                    1 for msg in recent_tool_messages 
+                    if "✓ created" in str(msg.content).lower()
+                )
+                
+                _log = logging.getLogger(__name__)
+                _log.info(f"[Loop Prevention] design_create_count={design_create_count}, tool_calls_pending={len(last_message.tool_calls)}")
+                
+                # If we've already created all 7 documents, allow ONE more turn for the agent to respond
+                # This prevents the infinite loop but allows the agent to ask questions after creating docs
+                if design_create_count >= 7:
+                    # Check if the pending tool call is ANOTHER design_create (would be 8th)
+                    next_tool_names = [tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "") for tc in last_message.tool_calls]
+                    if "design_create" in next_tool_names:
+                        _log.info(f"[Loop Prevention] Blocking 8th design_create call - documents complete")
+                        return END
+                    # Otherwise allow other tool calls (agent might need to read docs, etc.)
+                    _log.info(f"[Loop Prevention] Allowing non-create tool call: {next_tool_names}")
+                    return "tools"
+            
+            # Otherwise, proceed with tool calls
+            return "tools"
+    
+    return END
+
+
 def should_continue_to_editor(state: AgentState) -> Literal["editor", END]:
     """
     Route function from planner node.
@@ -651,16 +766,17 @@ def create_agent_graph(
     workflow.set_entry_point("router")
     workflow.add_conditional_edges("router", route_entry, {"planner": "planner", "editor": "editor"})
     
-    # Add edges
+    # Add edges for planner - can call tools, then returns to planner or ends
     workflow.add_conditional_edges(
         "planner",
-        should_continue_to_editor,
+        should_call_tools_from_planner,
         {
-            "editor": "editor",
+            "tools": "tools",
             END: END,
         }
     )
     
+    # Add edges for editor - can call tools
     workflow.add_conditional_edges(
         "editor",
         should_call_tools,
@@ -671,8 +787,13 @@ def create_agent_graph(
         }
     )
     
-    # Tools always return to editor
-    workflow.add_edge("tools", "editor")
+    # Route tools back based on mode
+    def route_from_tools(state: AgentState) -> Literal["planner", "editor"]:
+        """After tools execute, return to the appropriate node based on mode."""
+        mode = state.get("mode", "plan")
+        return "planner" if mode == "plan" else "editor"
+    
+    workflow.add_conditional_edges("tools", route_from_tools, {"planner": "planner", "editor": "editor"})
     
     return workflow.compile()
 

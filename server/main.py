@@ -10,6 +10,7 @@ import logging
 import os
 import json
 import time
+import shutil
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, Optional
 
@@ -305,6 +306,13 @@ def get_default_workspace_permissions() -> list[dict]:
         # Auto-approve reading the todo list
         {"permission": "todoread", "pattern": "*", "action": "allow"},
         
+        # Auto-approve design document operations (plan mode)
+        {"permission": "design_create", "pattern": "*", "action": "allow"},
+        {"permission": "design_read", "pattern": "*", "action": "allow"},
+        {"permission": "design_write", "pattern": "*", "action": "allow"},
+        {"permission": "design_list", "pattern": "*", "action": "allow"},
+        {"permission": "design_update_section", "pattern": "*", "action": "allow"},
+        
         # Require approval for shell commands (can modify system)
         {"permission": "bash", "pattern": "*", "action": "ask"},
         
@@ -362,6 +370,7 @@ async def stream_agent_response_with_save(
     assistant_text_parts: list[str] = []
     tool_calls_saved: dict[str, dict] = {}  # call_id -> tool info
     sent_content_length = 0  # Track how much content we've already sent
+    is_json_response = None  # Track if response is JSON (check once on first content chunk)
 
     # Set tool context so permission layer can ask for session-scoped permissions.
     # When a tool needs user confirmation, on_permission_request puts the request in a queue
@@ -372,6 +381,7 @@ async def stream_agent_response_with_save(
     try:
         from server.tools.context import set_tool_context, clear_tool_context
         _clear_ctx = clear_tool_context
+        _log.info(f"[Context] Setting tool context: session={session_id}, workspace={workspace_root}")
         set_tool_context(
             session_id,
             workspace_root,
@@ -382,6 +392,7 @@ async def stream_agent_response_with_save(
         try:
             from tools.context import set_tool_context, clear_tool_context
             _clear_ctx = clear_tool_context
+            _log.info(f"[Context] Setting tool context: session={session_id}, workspace={workspace_root}")
             set_tool_context(
                 session_id,
                 workspace_root,
@@ -477,6 +488,7 @@ async def stream_agent_response_with_save(
                     continue
                 new_messages = messages  # delta from this node
                 _log.debug("stream node=%s messages_count=%s", node_name, len(new_messages))
+                _log.info(f"[Stream Node] node={node_name}, new_messages={len(new_messages)}")
                 for message in new_messages:
                     # Handle tool calls
                     if hasattr(message, 'tool_calls') and message.tool_calls:
@@ -504,6 +516,7 @@ async def stream_agent_response_with_save(
                                 },
                             }
                             session_svc.update_part(part)
+                            _log.info(f"[Tool Call] {_name} with args: {str(args)[:200]}")
                             chat_chunk = ChatChunk(
                                 type="tool_call",
                                 tool_name=_name,
@@ -515,6 +528,7 @@ async def stream_agent_response_with_save(
                         call_id = message.tool_call_id
                         tool_name = getattr(message, 'name', tool_calls_saved.get(call_id, {}).get("name", "unknown"))
                         tool_output = str(message.content)
+                        _log.info(f"[Tool Result] {tool_name} returned: {tool_output[:200]}")
                         storage = get_storage()
                         for part_key in storage.list(["part", assistant_message_id]):
                             try:
@@ -544,20 +558,33 @@ async def stream_agent_response_with_save(
                     # Handle text content
                     elif isinstance(message, AIMessage) and message.content:
                         content = str(message.content)
-                        # Debug: log first 200 chars to see what LLM is returning
-                        if not assistant_text_parts:  # Only log once at start
-                            _log.info(f"[LLM Response] First 200 chars: {content[:200]}")
-                            _log.info(f"[LLM Response] Starts with {{? {content.strip().startswith('{')}")
-                            _log.info(f"[LLM Response] message type: {type(message)}, has additional_kwargs? {hasattr(message, 'additional_kwargs')}")
-                            if hasattr(message, 'additional_kwargs'):
-                                _log.info(f"[LLM Response] additional_kwargs: {message.additional_kwargs}")
+                        _log.info(f"[AIMessage Content] node={node_name}, content_length={len(content)}, sent_so_far={sent_content_length}, first_100={content[:100]}")
                         
-                        if not (hasattr(message, 'tool_calls') and message.tool_calls):
-                            # Only stream the new content that hasn't been sent yet
-                            new_content = content[sent_content_length:]
-                            if new_content:
-                                assistant_text_parts.append(new_content)
-                                sent_content_length = len(content)
+                        # If content is shorter than what we've already sent, this is a new message - reset tracking
+                        if len(content) < sent_content_length:
+                            _log.info(f"[AIMessage Content] New message detected (length {len(content)} < sent {sent_content_length}), resetting tracking")
+                            sent_content_length = 0
+                            is_json_response = None  # Also reset JSON detection for new message
+                        
+                        # On first chunk, detect if this is JSON (before any streaming)
+                        if is_json_response is None:
+                            is_json_response = content.strip().startswith('{')
+                            _log.info(f"[LLM Response] First content chunk, length: {len(content)}")
+                            _log.info(f"[LLM Response] Detected response type: {'JSON (will buffer)' if is_json_response else 'plain text (will stream)'}")
+                            _log.info(f"[LLM Response] First 200 chars: {content[:200]}")
+                        
+                        # Accumulate content
+                        new_content = content[sent_content_length:]
+                        if new_content:
+                            assistant_text_parts.append(new_content)
+                            sent_content_length = len(content)
+                            
+                            # Only stream non-JSON content incrementally
+                            if is_json_response:
+                                # JSON: buffer completely, send only in 'done' chunk
+                                _log.debug(f"[LLM Response] Buffered {len(new_content)} JSON chars (not streaming)")
+                            else:
+                                # Plain text: stream incrementally for better UX
                                 chunk_size = 50
                                 for i in range(0, len(new_content), chunk_size):
                                     chunk_text = new_content[i:i + chunk_size]
@@ -1096,6 +1123,75 @@ if SESSION_AVAILABLE:
             _log.error(f"Failed to reset context: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to reset context: {str(e)}")
     
+    @app.post("/sessions/{session_id}/reset-session", summary="Reset entire session")
+    async def reset_entire_session(session_id: str):
+        """
+        Reset entire session by:
+        1. Deleting all messages
+        2. Deleting all files in workspace directory
+        3. Deleting design documents
+        This completely resets the session to a fresh state.
+        """
+        try:
+            session_svc = get_session()
+            
+            # Get session to verify it exists and get workspace path
+            try:
+                session = session_svc.get(session_id)
+            except NotFoundError:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            
+            workspace_root = Path(session["directory"])
+            deleted_files = 0
+            deleted_messages = 0
+            
+            # Delete all messages
+            messages = session_svc.messages(session_id=session_id)
+            for msg in messages:
+                msg_id = msg.get("info", {}).get("id")
+                if msg_id:
+                    try:
+                        session_svc.remove_message(session_id, msg_id)
+                        deleted_messages += 1
+                    except Exception as e:
+                        _log = logging.getLogger(__name__)
+                        _log.warning(f"Failed to remove message {msg_id}: {e}")
+            
+            # Delete all files in workspace (except .openscrum directory metadata)
+            if workspace_root.exists():
+                for item in workspace_root.iterdir():
+                    try:
+                        # Skip .openscrum directory itself, but we'll clean design docs inside
+                        if item.name == ".openscrum":
+                            # Delete design documents
+                            design_dir = item / "design"
+                            if design_dir.exists():
+                                for design_file in design_dir.iterdir():
+                                    if design_file.is_file():
+                                        design_file.unlink()
+                                        deleted_files += 1
+                        elif item.is_file():
+                            item.unlink()
+                            deleted_files += 1
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+                            deleted_files += 1
+                    except Exception as e:
+                        _log = logging.getLogger(__name__)
+                        _log.warning(f"Failed to remove {item}: {e}")
+            
+            return {
+                "message": f"Session reset complete - deleted {deleted_messages} messages and {deleted_files} files/directories",
+                "deleted_messages": deleted_messages,
+                "deleted_files": deleted_files
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            _log = logging.getLogger(__name__)
+            _log.error(f"Failed to reset session: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to reset session: {str(e)}")
+    
     @app.get("/workspaces", summary="List all workspaces")
     async def list_workspaces():
         """
@@ -1560,6 +1656,136 @@ if SESSION_AVAILABLE:
                 return stats
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
+# ============================================================================
+# Design Documents API (Plan Mode)
+# ============================================================================
+
+if SESSION_AVAILABLE:
+    @app.get("/sessions/{session_id}/design/list", summary="List design documents")
+    async def list_design_documents(session_id: str):
+        """List all design documents and their status for a session."""
+        try:
+            # Get session to ensure it exists and to get workspace
+            session_svc = get_session()
+            session_info = session_svc.get(session_id)
+            if not session_info:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            workspace_root = session_info.directory
+            
+            from server.design_docs import DesignDocumentManager
+            manager = DesignDocumentManager(workspace_root)
+            docs = manager.list_documents()
+            
+            return {"documents": docs}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Failed to list design documents: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.get("/sessions/{session_id}/design/{doc_type}", summary="Get design document")
+    async def get_design_document(session_id: str, doc_type: str):
+        """Get the content of a specific design document."""
+        try:
+            # Get session to ensure it exists and to get workspace
+            session_svc = get_session()
+            session_info = session_svc.get(session_id)
+            if not session_info:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            workspace_root = session_info.directory
+            
+            logging.info(f"[API] Fetching design doc: session={session_id}, doc_type={doc_type}, workspace={workspace_root}")
+            
+            from server.design_docs import DesignDocumentManager, DESIGN_DOC_TYPES
+            
+            if doc_type not in DESIGN_DOC_TYPES:
+                raise HTTPException(status_code=400, detail=f"Invalid document type: {doc_type}")
+            
+            manager = DesignDocumentManager(workspace_root)
+            content = manager.read_document(doc_type)
+            
+            logging.info(f"[API] Read design doc {doc_type}: exists={content is not None}, content_length={len(content) if content else 0}")
+            
+            if content is None:
+                return {
+                    "exists": False,
+                    "doc_type": doc_type,
+                    "content": None
+                }
+            
+            return {
+                "exists": True,
+                "doc_type": doc_type,
+                "name": DESIGN_DOC_TYPES[doc_type]["name"],
+                "content": content
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Failed to get design document: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    class DesignDocumentUpdate(BaseModel):
+        content: str
+    
+    @app.put("/sessions/{session_id}/design/{doc_type}", summary="Update design document")
+    async def update_design_document(session_id: str, doc_type: str, update: DesignDocumentUpdate):
+        """Update the content of a specific design document (used for user manual edits)."""
+        try:
+            # Get session to ensure it exists and to get workspace
+            session_svc = get_session()
+            session_info = session_svc.get(session_id)
+            if not session_info:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            workspace_root = session_info.directory
+            
+            from server.design_docs import DesignDocumentManager, DESIGN_DOC_TYPES
+            
+            if doc_type not in DESIGN_DOC_TYPES:
+                raise HTTPException(status_code=400, detail=f"Invalid document type: {doc_type}")
+            
+            manager = DesignDocumentManager(workspace_root)
+            doc_path = manager.write_document(doc_type, update.content)
+            
+            return {
+                "success": True,
+                "doc_type": doc_type,
+                "path": doc_path,
+                "message": f"Updated {DESIGN_DOC_TYPES[doc_type]['name']}"
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Failed to update design document: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.get("/sessions/{session_id}/design", summary="Get all design documents")
+    async def get_all_design_documents(session_id: str):
+        """Get all design documents for a session."""
+        try:
+            # Get session to ensure it exists and to get workspace
+            session_svc = get_session()
+            session_info = session_svc.get(session_id)
+            if not session_info:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            workspace_root = session_info.directory
+            
+            from server.design_docs import DesignDocumentManager
+            manager = DesignDocumentManager(workspace_root)
+            all_docs = manager.get_all_documents()
+            
+            return {"documents": all_docs}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Failed to get all design documents: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

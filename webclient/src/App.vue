@@ -46,6 +46,14 @@
             >
               Reset Context
             </button>
+            <button
+              @click="handleResetSession"
+              :disabled="!sessionId"
+              class="px-3 py-1.5 text-sm rounded-lg bg-red-700 hover:bg-red-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Reset entire session - deletes all messages AND workspace files (cannot be undone)"
+            >
+              Reset Session
+            </button>
           </div>
         </div>
       </header>
@@ -69,10 +77,15 @@
                 :key="index"
                 class="flex justify-start"
               >
-                <div :class="[
-                  'max-w-[85%]',
-                  message.role === 'user' ? 'message-user' : 'message-agent'
-                ]">
+                <div 
+                  :class="[
+                    'max-w-[85%]',
+                    message.role === 'user' ? 'message-user' : 'message-agent',
+                    'cursor-pointer hover:opacity-90 transition-opacity'
+                  ]"
+                  @dblclick="copyMessageToClipboard(message, index, $event)"
+                  title="Double-click to copy"
+                >
                   <div v-if="message.role === 'agent'" class="prose prose-invert max-w-none">
                     <!-- Display text content (if any) -->
                     <div v-if="extractDisplayContent(message.content)" 
@@ -80,6 +93,19 @@
                   </div>
                   <div v-else class="whitespace-pre-wrap">{{ message.content }}</div>
                 </div>
+              </div>
+              
+              <!-- Copied indicator at cursor position -->
+              <div 
+                v-if="copiedMessageIndex !== null"
+                class="fixed bg-green-600 text-white text-xs px-3 py-1 rounded-full shadow-lg z-50 pointer-events-none animate-fade-in"
+                :style="{ 
+                  left: copiedMessagePosition.x + 'px', 
+                  top: (copiedMessagePosition.y - 30) + 'px',
+                  transform: 'translateX(-50%)'
+                }"
+              >
+                ✓ Copied!
               </div>
 
               <!-- Thinking/Working indicator -->
@@ -155,10 +181,19 @@
           :class="{ 'bg-accent': isDraggingLeft }"
         ></div>
 
-        <!-- Center Pane - Progress/Plan Display (30%) -->
+        <!-- Center Pane - Progress/Plan Display or Design Docs (30%) -->
         <div class="flex flex-col bg-surface/50 border-r border-surface-dark" :style="{ width: centerPaneWidth + '%' }">
-          <!-- Progress Tracker at Top (Edit Mode Only) -->
-          <div v-if="latestProgress && mode === 'edit'" class="p-4 overflow-y-auto custom-scrollbar">
+          <!-- Plan Mode: Design Document List -->
+          <div v-if="mode === 'plan'" class="h-full">
+            <DesignDocList
+              :documents="designDocuments"
+              :selectedDoc="selectedDesignDoc"
+              @select="handleSelectDesignDoc"
+            />
+          </div>
+          
+          <!-- Edit Mode: Progress Tracker -->
+          <div v-else-if="latestProgress && mode === 'edit'" class="p-4 overflow-y-auto custom-scrollbar">
             <ProgressTracker 
               :plan="latestProgress.plan"
               :currentProgress="latestProgress.current_progress"
@@ -168,12 +203,7 @@
           <!-- Empty State / Mode Info -->
           <div v-else class="flex items-center justify-center h-full text-text-muted px-4">
             <div class="text-center">
-              <p class="text-sm" v-if="mode === 'plan'">
-                <span class="block font-medium text-text mb-2">Plan Mode</span>
-                Progress tracking disabled in planning mode.<br>
-                Switch to Edit mode to see execution progress.
-              </p>
-              <p class="text-sm" v-else>
+              <p class="text-sm">
                 Progress will appear here during execution
               </p>
             </div>
@@ -187,28 +217,41 @@
           :class="{ 'bg-accent': isDraggingRight }"
         ></div>
 
-        <!-- Right Pane - Tools (30%) - Split into top and bottom -->
+        <!-- Right Pane - Tools or Design Doc Viewer (30%) -->
         <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth - centerPaneWidth) + '%' }">
-          <!-- Top Section - Tool List -->
-          <div class="bg-surface/30 border-b border-surface-dark overflow-auto" :style="{ height: rightTopHeight + '%' }">
-            <ToolList 
-              :tools="toolExecutions" 
-              :selectedTool="selectedTool"
-              @select="handleSelectTool"
+          <!-- Plan Mode: Design Document Viewer -->
+          <div v-if="mode === 'plan'" class="h-full">
+            <DesignDocViewer
+              :docType="selectedDesignDoc"
+              :docInfo="designDocInfo"
+              :content="selectedDesignDocContent"
+              @save="handleSaveDesignDoc"
             />
           </div>
           
-          <!-- Vertical Draggable Divider -->
-          <div 
-            @mousedown="startDraggingVertical"
-            class="h-1 bg-surface-dark hover:bg-accent cursor-row-resize transition-colors flex-shrink-0"
-            :class="{ 'bg-accent': isDraggingVertical }"
-          ></div>
-          
-          <!-- Bottom Section - Tool Output -->
-          <div class="flex-1 overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
-            <ToolOutput :tool="selectedTool" />
-          </div>
+          <!-- Edit Mode: Tool List and Output (Split view) -->
+          <template v-else>
+            <!-- Top Section - Tool List -->
+            <div class="bg-surface/30 border-b border-surface-dark overflow-auto" :style="{ height: rightTopHeight + '%' }">
+              <ToolList 
+                :tools="toolExecutions" 
+                :selectedTool="selectedTool"
+                @select="handleSelectTool"
+              />
+            </div>
+            
+            <!-- Vertical Draggable Divider -->
+            <div 
+              @mousedown="startDraggingVertical"
+              class="h-1 bg-surface-dark hover:bg-accent cursor-row-resize transition-colors flex-shrink-0"
+              :class="{ 'bg-accent': isDraggingVertical }"
+            ></div>
+            
+            <!-- Bottom Section - Tool Output -->
+            <div class="flex-1 overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
+              <ToolOutput :tool="selectedTool" />
+            </div>
+          </template>
         </div>
       </div>
 
@@ -249,6 +292,8 @@ import ProgressTracker from './components/ProgressTracker.vue'
 import TokenUsageIndicator from './components/TokenUsageIndicator.vue'
 import ToolList from './components/ToolList.vue'
 import ToolOutput from './components/ToolOutput.vue'
+import DesignDocList from './components/DesignDocList.vue'
+import DesignDocViewer from './components/DesignDocViewer.vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
@@ -264,6 +309,7 @@ const {
   replyToPermission,
   compressContext,
   resetContext,
+  resetSession,
   getTokenUsage,
   sessionId,
   modelName 
@@ -284,6 +330,13 @@ const isInitializing = ref(true)
 const pendingPermission = ref(null)
 const permissionResolve = ref(null)
 const pendingQuestionData = ref(null)
+
+// Design documents state (Plan Mode)
+const designDocuments = ref({})
+const selectedDesignDoc = ref(null)
+const selectedDesignDocContent = ref(null)
+const designDocInfo = ref(null)
+const autoSaveTimer = ref(null)
 
 // Session state tracking - persisted across reloads
 // States: 'idle' | 'thinking' | 'working' | 'waiting_permission' | 'executing_tool'
@@ -313,6 +366,10 @@ const tokenUsage = ref({
   model: '',
   messageCount: 0,
 })
+
+// Copy to clipboard tracking
+const copiedMessageIndex = ref(null)
+const copiedMessagePosition = ref({ x: 0, y: 0 })
 
 // Display name: prefer session.title from server, fallback to 'Untitled Session'
 const sessionDisplayName = computed(() => {
@@ -558,6 +615,12 @@ const extractDisplayContent = (content) => {
     try {
       const parsed = JSON.parse(trimmed)
       
+      // IMPORTANT: Remove any tool_calls field if present (should not be in content JSON)
+      if (parsed.tool_calls) {
+        console.warn('[Display] WARNING: Found tool_calls in content JSON (should not be there), ignoring')
+        delete parsed.tool_calls
+      }
+      
       // Check for questions structure (nested format with content field)
       // This is the format from plan mode: {"content": "...", "questions": {...}}
       if (parsed.questions && typeof parsed.questions === 'object') {
@@ -565,7 +628,9 @@ const extractDisplayContent = (content) => {
         if (questionsData.type === 'questions' && Array.isArray(questionsData.questions)) {
           // This is questions JSON! Return the content field for display
           console.log('[Display] Detected questions JSON (nested format), extracting content field')
-          return parsed.content || ''
+          // Unescape newlines in content for proper display
+          const contentText = parsed.content || ''
+          return contentText.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
         }
       }
       
@@ -584,15 +649,16 @@ const extractDisplayContent = (content) => {
         // Progress tracker will show the plan/progress in center pane
         if (parsed.content && typeof parsed.content === 'string' && parsed.content.trim()) {
           console.log('[Display] Progress JSON has content field, extracting for display')
-          return parsed.content
+          return parsed.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
         }
         // Otherwise don't display anything in chat (progress only in center pane)
         console.log('[Display] Progress JSON without content, returning null')
         return null
       }
     } catch (e) {
-      console.log('[Display] JSON parse failed:', e.message, 'First 100 chars:', trimmed.substring(0, 100))
-      // Continue to other checks
+      console.error('[Display] JSON parse failed:', e.message, 'First 200 chars:', trimmed.substring(0, 200))
+      // If JSON parsing fails, return the original content (it's not JSON)
+      return content
     }
   }
   
@@ -807,6 +873,12 @@ const detectStructuredQuestions = (content) => {
       const parsed = JSON.parse(trimmed)
       console.log('[Questions] Successfully parsed JSON, keys:', Object.keys(parsed))
       
+      // IMPORTANT: Remove any tool_calls field if present (should not be in content JSON)
+      if (parsed.tool_calls) {
+        console.warn('[Questions] WARNING: Found tool_calls in content JSON (should not be there), ignoring')
+        delete parsed.tool_calls
+      }
+      
       // Check if it has the questions structure directly
       if (parsed.type === 'questions' && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
         console.log('[Questions] ✓ Detected structured questions (direct format):', parsed)
@@ -825,7 +897,7 @@ const detectStructuredQuestions = (content) => {
         }
       }
     } catch (e) {
-      console.log('[Questions] Failed to parse entire content as JSON:', e.message)
+      console.error('[Questions] Failed to parse entire content as JSON:', e.message, 'First 200 chars:', trimmed.substring(0, 200))
       // Continue to check for embedded JSON
     }
   }
@@ -1025,6 +1097,70 @@ const handleCompressContext = async () => {
   }
 }
 
+// Copy message to clipboard on double-click
+const copyMessageToClipboard = async (message, index, event) => {
+  // Extract plain text content from the message
+  let textToCopy = ''
+  
+  if (message.role === 'agent') {
+    // For agent messages, extract display content (without JSON data)
+    textToCopy = extractDisplayContent(message.content)
+  } else {
+    // For user messages, use content as-is
+    textToCopy = message.content
+  }
+  
+  if (!textToCopy || !textToCopy.trim()) {
+    return // Nothing to copy
+  }
+  
+  try {
+    // Use Clipboard API to copy
+    await navigator.clipboard.writeText(textToCopy)
+    
+    // Capture cursor position
+    copiedMessagePosition.value = {
+      x: event.clientX,
+      y: event.clientY
+    }
+    
+    // Show visual feedback
+    copiedMessageIndex.value = index
+    setTimeout(() => {
+      copiedMessageIndex.value = null
+    }, 1500)
+    
+    console.log('Message copied to clipboard')
+  } catch (error) {
+    console.error('Failed to copy message:', error)
+    // Fallback: try to use the older execCommand method
+    try {
+      const textarea = document.createElement('textarea')
+      textarea.value = textToCopy
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+      
+      // Capture cursor position
+      copiedMessagePosition.value = {
+        x: event.clientX,
+        y: event.clientY
+      }
+      
+      // Show visual feedback
+      copiedMessageIndex.value = index
+      setTimeout(() => {
+        copiedMessageIndex.value = null
+      }, 1500)
+    } catch (fallbackError) {
+      console.error('Fallback copy also failed:', fallbackError)
+    }
+  }
+}
+
 const handleResetContext = async () => {
   if (!sessionId.value || messages.value.length === 0) return
   
@@ -1052,6 +1188,45 @@ const handleResetContext = async () => {
   } catch (error) {
     console.error('Failed to reset context:', error)
     alert('Failed to reset context: ' + error.message)
+  }
+}
+
+const handleResetSession = async () => {
+  if (!sessionId.value) {
+    console.warn('No session ID to reset session')
+    return
+  }
+  
+  if (!confirm('COMPLETELY RESET this session?\n\nThis will:\n• Delete all conversation history\n• Delete all files in workspace\n• Delete all design documents\n\nThis CANNOT be undone!')) {
+    return
+  }
+  
+  try {
+    const result = await resetSession(sessionId.value)
+    
+    // Clear frontend state
+    messages.value = []
+    toolExecutions.value = []
+    selectedTool.value = null
+    pendingQuestionData.value = null
+    latestProgress.value = null
+    designDocuments.value = []
+    selectedDocument.value = null
+    
+    // Clear session state
+    clearSessionState()
+    
+    // Reset pane width to default
+    leftPaneWidth.value = calculateOptimalChatWidth()
+    
+    // Update token usage after reset
+    await fetchTokenUsage()
+    
+    console.log('Session reset successfully:', result)
+    alert(`Session reset complete!\n\nDeleted ${result.deleted_messages} messages and ${result.deleted_files} files/directories.`)
+  } catch (error) {
+    console.error('Failed to reset session:', error)
+    alert('Failed to reset session: ' + error.message)
   }
 }
 
@@ -1149,6 +1324,91 @@ const handleSelectTool = (tool) => {
   selectedTool.value = tool
 }
 
+// ============================================================================
+// Design Documents (Plan Mode)
+// ============================================================================
+
+const fetchDesignDocuments = async () => {
+  if (!sessionId.value) return
+  
+  try {
+    const response = await fetch(`http://localhost:8000/sessions/${sessionId.value}/design/list`)
+    if (response.ok) {
+      const data = await response.json()
+      designDocuments.value = data.documents || {}
+      console.log('[Design] Fetched design documents:', Object.keys(designDocuments.value).length)
+    }
+  } catch (error) {
+    console.error('[Design] Failed to fetch design documents:', error)
+  }
+}
+
+const handleSelectDesignDoc = async (docType) => {
+  console.log('[Design] Selected document:', docType)
+  selectedDesignDoc.value = docType
+  
+  // Fetch document content
+  try {
+    const response = await fetch(`http://localhost:8000/sessions/${sessionId.value}/design/${docType}`)
+    if (response.ok) {
+      const data = await response.json()
+      if (data.exists) {
+        selectedDesignDocContent.value = data.content
+        designDocInfo.value = {
+          name: data.name,
+          description: designDocuments.value[docType]?.description || ''
+        }
+      } else {
+        selectedDesignDocContent.value = null
+        designDocInfo.value = {
+          name: data.name || designDocuments.value[docType]?.name || docType,
+          description: designDocuments.value[docType]?.description || ''
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[Design] Failed to fetch document content:', error)
+  }
+}
+
+const handleSaveDesignDoc = async ({ docType, content }) => {
+  if (!sessionId.value || !docType) return
+  
+  console.log('[Design] Saving document:', docType)
+  
+  try {
+    const response = await fetch(`http://localhost:8000/sessions/${sessionId.value}/design/${docType}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ content })
+    })
+    
+    if (response.ok) {
+      const data = await response.json()
+      console.log('[Design] Document saved:', data.message)
+      
+      // Update local content
+      selectedDesignDocContent.value = content
+      
+      // Refresh document list to update timestamps
+      await fetchDesignDocuments()
+    } else {
+      console.error('[Design] Failed to save document:', await response.text())
+    }
+  } catch (error) {
+    console.error('[Design] Failed to save document:', error)
+  }
+}
+
+// Watch for mode changes and session changes to fetch design docs
+watch([mode, sessionId], async ([newMode, newSessionId]) => {
+  if (newMode === 'plan' && newSessionId) {
+    await fetchDesignDocuments()
+  }
+})
+
 const sendMessage = async () => {
   if (!inputMessage.value.trim() || isSending.value || !sessionId.value) return
 
@@ -1186,15 +1446,17 @@ const sendMessage = async () => {
           updateSessionState('idle', false)
           console.log('[Stream] Token received, state set to idle')
           
-          // Update or create agent message
-          const lastMessage = messages.value[messages.value.length - 1]
-          if (lastMessage && lastMessage.role === 'agent' && !currentToolName) {
-            lastMessage.content = agentContent
-          } else {
-            messages.value.push({
-              role: 'agent',
-              content: agentContent,
-            })
+          // Update or create agent message (only if we have content)
+          if (agentContent && agentContent.trim()) {
+            const lastMessage = messages.value[messages.value.length - 1]
+            if (lastMessage && lastMessage.role === 'agent' && !currentToolName) {
+              lastMessage.content = agentContent
+            } else {
+              messages.value.push({
+                role: 'agent',
+                content: agentContent,
+              })
+            }
           }
           
           await nextTick()
@@ -1267,6 +1529,9 @@ const sendMessage = async () => {
             }
           }
           
+          // Reset currentToolName so subsequent agent messages update the last message
+          currentToolName = null
+          
           // Update state - LLM is now processing the tool result
           updateSessionState('thinking', true, 'Agent is thinking...')
           console.log('[Stream] Tool result processed, waiting for LLM response')
@@ -1284,6 +1549,13 @@ const sendMessage = async () => {
           currentTool.value = null
           currentToolCommand.value = null
           
+          // In Plan Mode, refetch design documents after Agent finishes
+          // (Agent may have created/updated design docs via tool_calls)
+          if (mode.value === 'plan') {
+            console.log('[Design] Refetching design documents after Agent response')
+            await fetchDesignDocuments()
+          }
+          
           if (finalContent) {
             // Check for progress/plan data and store it separately
             console.log('[Progress] Checking for progress data in final content...')
@@ -1295,22 +1567,36 @@ const sendMessage = async () => {
             
             // Check if the agent returned structured questions
             console.log('[Questions] Checking for questions in final content...')
+            console.log('[Questions] Content length:', finalContent?.length, 'First 300 chars:', finalContent?.substring(0, 300))
             const questionData = detectStructuredQuestions(finalContent)
             console.log('[Questions] Detection result:', questionData ? 'FOUND' : 'NOT FOUND')
+            if (questionData) {
+              console.log('[Questions] Question data structure:', JSON.stringify(questionData, null, 2))
+            }
             
             // If we found questions, extract the content separately
             let displayContent = finalContent
             if (questionData) {
               try {
                 const parsed = JSON.parse(finalContent.trim())
+                // Remove tool_calls if present (shouldn't be in content JSON)
+                if (parsed.tool_calls) {
+                  console.warn('[Questions] Removing tool_calls from content JSON')
+                  delete parsed.tool_calls
+                }
                 // If there's a separate content field, use that for display
                 if (parsed.content && typeof parsed.content === 'string') {
-                  displayContent = parsed.content
-                  console.log('[Questions] Extracted display content, length:', displayContent.length)
+                  // Unescape newlines and tabs
+                  displayContent = parsed.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+                  console.log('[Questions] Extracted and unescaped display content, length:', displayContent.length)
+                } else {
+                  console.warn('[Questions] No content field in parsed JSON, using empty string')
+                  displayContent = ''
                 }
               } catch (e) {
                 // Keep original content if parsing fails
-                console.log('[Questions] Failed to extract content:', e.message)
+                console.error('[Questions] Failed to extract content from JSON:', e.message)
+                displayContent = ''
               }
               console.log('[Questions] Setting pendingQuestionData.value')
               pendingQuestionData.value = questionData
@@ -1318,9 +1604,21 @@ const sendMessage = async () => {
             }
             
             // Ensure final message is rendered with the display content
-            const lastMessage = messages.value[messages.value.length - 1]
-            if (lastMessage && lastMessage.role === 'agent') {
-              lastMessage.content = displayContent
+            // Only create/update message if there's actual content to display
+            if (displayContent && displayContent.trim()) {
+              const lastMessage = messages.value[messages.value.length - 1]
+              if (lastMessage && lastMessage.role === 'agent') {
+                lastMessage.content = displayContent
+              } else {
+                // If no agent message exists yet (e.g., buffered JSON with no token chunks),
+                // create one now with the display content
+                messages.value.push({
+                  role: 'agent',
+                  content: displayContent,
+                })
+              }
+            } else {
+              console.log('[Stream] Skipping blank message (no content to display)')
             }
           }
         } else if (chunkType === 'error') {
@@ -1721,3 +2019,20 @@ onMounted(async () => {
   }
 })
 </script>
+
+<style scoped>
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+</style>

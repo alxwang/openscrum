@@ -208,6 +208,16 @@ export function useApiClient() {
     }
   }
 
+  const resetSession = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/reset-session`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to reset session:', error)
+      throw error
+    }
+  }
+
   const replyToPermission = async (requestId, reply) => {
     try {
       const response = await client.post(`/permissions/${requestId}/reply`, {
@@ -250,6 +260,7 @@ export function useApiClient() {
     replyToPermission,
     compressContext,
     resetContext,
+    resetSession,
     getTokenUsage,
     sessionId,
     modelName,

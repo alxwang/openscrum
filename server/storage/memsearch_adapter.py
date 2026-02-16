@@ -129,9 +129,9 @@ class MemSearchAdapter(Storage):
                         
                         # Configure max_chunk_size based on model token limits
                         # text-embedding-3-small has 8192 token limit
-                        # Conservative estimate: 1 token ≈ 0.75 chars for typical text, less for code/JSON
-                        # Safe max: ~800 chars should stay well under 8192 tokens (~1000-2000 tokens)
-                        chunk_size = int(os.getenv("OPENSCRUM_MEMSEARCH_CHUNK_SIZE", "800"))
+                        # Conservative estimate: Even plain text can have varying token density
+                        # Safe max: 300 chars should stay well under 8192 tokens (~300-600 tokens typical)
+                        chunk_size = int(os.getenv("OPENSCRUM_MEMSEARCH_CHUNK_SIZE", "300"))
                         _log.info(f"Using chunk size: {chunk_size} chars (to stay within embedding model token limits)")
                         
                         self._memsearch = MemSearch(
@@ -167,9 +167,9 @@ class MemSearchAdapter(Storage):
                     logging.error(
                         f"Failed to index memories - text chunk too large for embedding model: {e}\n"
                         f"Solutions:\n"
-                        f"  1. Set a smaller chunk size: OPENSCRUM_MEMSEARCH_CHUNK_SIZE=500 (default: 800)\n"
+                        f"  1. Set a smaller chunk size: OPENSCRUM_MEMSEARCH_CHUNK_SIZE=200 (default: 300)\n"
                         f"  2. Use a model with larger token limit: OPENSCRUM_MEMSEARCH_EMBEDDING_MODEL=text-embedding-ada-002\n"
-                        f"  3. Check for files with very large code blocks or JSON without paragraph breaks"
+                        f"  3. Delete old memory files with large code blocks: rm -rf ~/.openscrum/memory/*"
                     )
                 else:
                     logging.error(f"Failed to index memories: {e}")
@@ -317,27 +317,11 @@ class MemSearchAdapter(Storage):
             for text in text_parts:
                 content_lines.append(text)
             
-            # Add tool executions (optional, can be verbose)
-            tools = [p for p in parts if p.get("type") == "tool"]
-            if tools:
-                content_lines.append("\n### Tool Executions")
-                for tool in tools:
-                    tool_name = tool.get("tool", "unknown")
-                    state = tool.get("state", {})
-                    status = state.get("status", "pending")
-                    content_lines.append(f"\n**{tool_name}** ({status})")
-                    if state.get("input"):
-                        # Truncate large inputs
-                        input_str = json.dumps(state['input'], indent=2)
-                        if len(input_str) > 300:
-                            input_str = input_str[:300] + "..."
-                        content_lines.append(f"```json\n{input_str}\n```")
-                    if state.get("output"):
-                        output = str(state['output'])
-                        # Truncate very long outputs
-                        if len(output) > 500:
-                            output = output[:500] + "..."
-                        content_lines.append(f"\nOutput:\n```\n{output}\n```")
+            # NOTE: Tool executions are NOT exported to markdown memory
+            # They contain large JSON payloads that:
+            # 1. Bloat the embeddings and cause token limit errors
+            # 2. Aren't useful for semantic search (code/paths don't match natural language queries)
+            # The conversational text (questions + explanations) is what matters for search
             
             content_lines.append("\n---\n")
             
