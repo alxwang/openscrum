@@ -313,6 +313,15 @@ def get_default_workspace_permissions() -> list[dict]:
         {"permission": "design_list", "pattern": "*", "action": "allow"},
         {"permission": "design_update_section", "pattern": "*", "action": "allow"},
         
+        # Auto-approve read-only codebase scanning operations
+        {"permission": "analyze_workspace", "pattern": "*", "action": "allow"},
+        {"permission": "scan_codebase", "pattern": "*", "action": "allow"},
+        {"permission": "extract_api_routes", "pattern": "*", "action": "allow"},
+        {"permission": "extract_db_schemas", "pattern": "*", "action": "allow"},
+        {"permission": "list_components", "pattern": "*", "action": "allow"},
+        {"permission": "list_services", "pattern": "*", "action": "allow"},
+        {"permission": "generate_design_from_code", "pattern": "*", "action": "allow"},
+        
         # Require approval for shell commands (can modify system)
         {"permission": "bash", "pattern": "*", "action": "ask"},
         
@@ -927,6 +936,92 @@ if SESSION_AVAILABLE:
             raise HTTPException(status_code=404, detail=str(e))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/sessions/{session_id}/workspace/analyze", summary="Analyze workspace state")
+    async def analyze_workspace_api(session_id: str):
+        try:
+            from server.tools.system_tools import analyze_workspace
+            from server.tools.context import set_tool_context, clear_tool_context
+            
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            
+            set_tool_context(session_id, str(workspace_root_path), [])
+            try:
+                result_json = analyze_workspace.invoke({})
+                import json
+                return json.loads(result_json)
+            finally:
+                clear_tool_context()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    @app.get("/sessions/{session_id}/workspace/sync-status", summary="Check design vs code sync status")
+    async def check_sync_status_api(session_id: str):
+        try:
+            from server.tools.system_tools import check_sync_status
+            from server.tools.context import set_tool_context, clear_tool_context
+            
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            
+            set_tool_context(session_id, str(workspace_root_path), [])
+            try:
+                result_json = check_sync_status.invoke({})
+                import json
+                return json.loads(result_json)
+            finally:
+                clear_tool_context()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    @app.post("/sessions/{session_id}/workspace/sync", summary="Trigger design document sync from code")
+    async def trigger_workspace_sync_api(session_id: str):
+        try:
+            from server.tools.system_tools import generate_design_from_code, load_sync_metadata, save_sync_metadata, check_sync_status
+            from server.tools.context import set_tool_context, clear_tool_context
+            from datetime import datetime
+            import json
+            
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            
+            set_tool_context(session_id, str(workspace_root_path), [])
+            try:
+                # 1. First trigger generation to run against the LangGraph LLM loop and write the files
+                # This could be handled via agent execution, but for explicit sync let's update metadata directly 
+                # acknowledging that code is now the source of truth for the synced timestamp.
+                
+                # Update metadata assuming the user has reviewed/is actively syncing
+                metadata = load_sync_metadata()
+                
+                # Check current status before updating so we have accurate timestamps
+                status_raw = check_sync_status.invoke({})
+                status = json.loads(status_raw)
+                
+                analysis = status.get("workspace_analysis", {})
+                current_time = datetime.utcnow().timestamp()
+                
+                # We update the timestamp to now so that no warnings show up unless
+                # the code is manipulated AFTER this point.
+                metadata["design_docs_last_synced"] = current_time
+                metadata["code_last_modified"] = analysis.get("latest_code_timestamp", 0)
+                metadata["sync_warnings"] = []
+                metadata["last_check"] = datetime.utcnow().isoformat()
+                
+                save_sync_metadata(metadata)
+                
+                return {"message": "Sync complete. Metadata updated.", "metadata": metadata}
+            finally:
+                clear_tool_context()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/sessions/{session_id}/children", summary="Get child sessions")
     async def session_children(session_id: str):

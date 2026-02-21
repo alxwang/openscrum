@@ -1423,6 +1423,499 @@ In production, this would prompt the user and switch to plan agent mode."""
 
 
 # ============================================================================
+# Workspace Analysis Tool
+# ============================================================================
+
+@tool
+def analyze_workspace() -> str:
+    """
+    Analyzes the workspace to determine its current state (empty, design docs only, code only, or both).
+    Returns a comprehensive JSON string detailing the workspace status.
+    """
+    import os
+    import json
+    from pathlib import Path
+
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return json.dumps({"error": "No workspace context available"})
+
+    root_path = Path(workspace_root)
+    
+    # 1. Check for design docs
+    design_dir = root_path / ".openscrum" / "design"
+    try:
+        from server.design_docs import DESIGN_DOC_TYPES
+        all_doc_types = list(DESIGN_DOC_TYPES.keys())
+    except ImportError:
+        all_doc_types = [
+            'functionalities', 'tech_stack', 'database_design', 
+            'user_flow', 'architecture', 'api_design', 'requirements'
+        ]
+        
+    existing_docs = []
+    latest_design_timestamp = 0
+
+    if design_dir.exists() and design_dir.is_dir():
+        for doc_type in all_doc_types:
+            doc_path = design_dir / f"{doc_type}.md"
+            if doc_path.exists():
+                existing_docs.append(doc_type)
+                mtime = doc_path.stat().st_mtime
+                if mtime > latest_design_timestamp:
+                    latest_design_timestamp = mtime
+
+    has_design_docs = len(existing_docs) > 0
+
+    # 2. Check for code files
+    code_extensions = {'.py', '.ts', '.js', '.vue', '.jsx', '.tsx', '.go', '.java', '.rb', '.php', '.cs', '.rs', '.c', '.cpp', '.h', '.hpp'}
+    ignore_dirs = {'.git', 'node_modules', '__pycache__', 'venv', '.venv', 'env', '.openscrum', 'dist', 'build', 'target', 'vendor', '.idea', '.vscode', 'public', 'assets'}
+    
+    code_file_count = 0
+    latest_code_timestamp = 0
+    languages_found = set()
+
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        # filter directories
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith('.')]
+        
+        # explicitly ensure we don't scan anything inside .openscrum for codebase metrics
+        if '.openscrum' in Path(dirpath).parts:
+            continue
+        
+        for f in filenames:
+            file_path = Path(dirpath) / f
+            ext = file_path.suffix.lower()
+            if ext in code_extensions:
+                code_file_count += 1
+                languages_found.add(ext)
+                try:
+                    mtime = file_path.stat().st_mtime
+                    if mtime > latest_code_timestamp:
+                        latest_code_timestamp = mtime
+                except OSError:
+                    pass
+
+    has_code = code_file_count > 0
+
+    # 3. Detect frameworks
+    detected_frameworks = []
+    
+    pkg_json_path = root_path / "package.json"
+    if pkg_json_path.exists():
+        try:
+            with open(pkg_json_path, 'r', encoding='utf-8') as f:
+                pkg_data = json.load(f)
+            deps = pkg_data.get('dependencies', {})
+            dev_deps = pkg_data.get('devDependencies', {})
+            all_deps = {**deps, **dev_deps}
+            
+            if 'react' in all_deps: detected_frameworks.append('React')
+            if 'vue' in all_deps: detected_frameworks.append('Vue')
+            if 'next' in all_deps: detected_frameworks.append('Next.js')
+            if 'nuxt' in all_deps: detected_frameworks.append('Nuxt')
+            if 'express' in all_deps: detected_frameworks.append('Express')
+            if 'tailwindcss' in all_deps: detected_frameworks.append('Tailwind CSS')
+            if 'svelte' in all_deps: detected_frameworks.append('Svelte')
+            if 'angular' in all_deps: detected_frameworks.append('Angular')
+        except Exception:
+            pass
+
+    req_txt_path = root_path / "requirements.txt"
+    if req_txt_path.exists():
+        try:
+            with open(req_txt_path, 'r', encoding='utf-8') as f:
+                content = f.read().lower()
+            if 'fastapi' in content: detected_frameworks.append('FastAPI')
+            if 'django' in content: detected_frameworks.append('Django')
+            if 'flask' in content: detected_frameworks.append('Flask')
+            if 'sqlalchemy' in content: detected_frameworks.append('SQLAlchemy')
+            if 'langchain' in content: detected_frameworks.append('LangChain')
+        except Exception:
+            pass
+
+    pyproj_path = root_path / "pyproject.toml"
+    if pyproj_path.exists():
+        try:
+             with open(pyproj_path, 'r', encoding='utf-8') as f:
+                 content = f.read().lower()
+             if 'fastapi' in content: detected_frameworks.append('FastAPI')
+             if 'django' in content: detected_frameworks.append('Django')
+        except Exception:
+             pass
+
+    status = {
+        "has_code": has_code,
+        "code_file_count": code_file_count,
+        "has_design_docs": has_design_docs,
+        "design_doc_count": len(existing_docs),
+        "existing_design_docs": existing_docs,
+        "total_design_doc_types": len(all_doc_types),
+        "needs_sync": has_code and has_design_docs and (latest_code_timestamp > latest_design_timestamp),
+        "latest_code_timestamp": latest_code_timestamp,
+        "latest_design_timestamp": latest_design_timestamp,
+        "main_languages": list(languages_found),
+        "detected_frameworks": list(set(detected_frameworks))
+    }
+
+    return json.dumps(status)
+
+
+# ============================================================================
+# Reverse Engineering Extractors
+# ============================================================================
+
+@tool
+def scan_codebase() -> str:
+    """
+    Scans the codebase and returns a high-level overview. Use this as a starting point 
+    for reverse engineering an existing project.
+    """
+    # Simply reuse analyze_workspace for the broad overview
+    return analyze_workspace.invoke({})
+
+@tool
+def extract_api_routes() -> str:
+    """
+    Scans the repository for API route definitions (e.g. Express app.get, FastAPI @app.get, etc.)
+    and returns a summary of the endpoints found.
+    """
+    import os
+    import re
+    from pathlib import Path
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+        
+    routes_found = []
+    
+    # Common router patterns
+    # Python (FastAPI/Flask): @app.get(...), @router.post(...)
+    py_route_pattern = re.compile(r'@(?:app|router|bp|[a-zA-Z0-9_]+)\.(get|post|put|delete|patch)\([\'"]([^\'"]+)[\'"]')
+    
+    # JS/TS (Express/Next.js/etc): app.get(...), router.post(...)
+    js_route_pattern = re.compile(r'(?:app|router|[a-zA-Z0-9_]+)\.(get|post|put|delete|patch)\([\'"]([^\'"]+)[\'"]')
+    
+    # Special Next.js app router parsing (directories)
+    
+    ignore_dirs = {'.git', 'node_modules', '__pycache__', 'venv', '.venv', '.openscrum', 'dist', 'build'}
+    
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith('.')]
+        
+        # Check Next.js app router structure
+        if 'app' in str(dirpath).split(os.sep) and ('api' in str(dirpath).split(os.sep) or 'route.ts' in filenames or 'route.js' in filenames):
+            rel_path = os.path.relpath(dirpath, workspace_root)
+            if 'api/' in rel_path:
+                route_path = '/' + rel_path.split('api/', 1)[1] if 'api/' in rel_path else '/' + rel_path
+                routes_found.append(f"Found Next.js App Route Handler: {route_path} (in {rel_path})")
+        
+        for f in filenames:
+            file_path = Path(dirpath) / f
+            ext = file_path.suffix.lower()
+            
+            if ext not in {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java'}:
+                continue
+                
+            try:
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    content = file.read()
+                    
+                    if ext == '.py':
+                        matches = py_route_pattern.findall(content)
+                        for method, route in matches:
+                            routes_found.append(f"[{method.upper()}] {route} (in {file_path.name})")
+                            
+                    elif ext in {'.js', '.ts', '.jsx', '.tsx'}:
+                        matches = js_route_pattern.findall(content)
+                        for method, route in matches:
+                            routes_found.append(f"[{method.upper()}] {route} (in {file_path.name})")
+                            
+            except Exception:
+                pass
+                
+    if not routes_found:
+        return "No clear API routes detected using standard patterns. They might be defined dynamically or using a less common framework."
+        
+    return "Extracted API Routes:\n" + "\n".join(routes_found)
+
+@tool
+def extract_db_schemas() -> str:
+    """
+    Scans the repository for database models or schema definitions (e.g. SQLAlchemy, Prisma, Mongoose)
+    and returns a summary of the entities found.
+    """
+    import os
+    import re
+    from pathlib import Path
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+        
+    schemas_found = []
+    
+    # SQLAlchemy / Django patterns
+    py_class_pattern = re.compile(r'class\s+([a-zA-Z0-9_]+)\s*\([^)]*\):')
+    py_table_pattern = re.compile(r'__tablename__\s*=\s*[\'"]([^\'"]+)[\'"]')
+    
+    # Prisma pattern
+    prisma_model_pattern = re.compile(r'model\s+([a-zA-Z0-9_]+)\s*{([^}]+)}')
+    
+    # Mongoose pattern
+    mongoose_pattern = re.compile(r'(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:new\s+)?mongoose\.Schema')
+    
+    ignore_dirs = {'.git', 'node_modules', '__pycache__', 'venv', '.venv', '.openscrum', 'dist', 'build'}
+    
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith('.')]
+        
+        for f in filenames:
+            file_path = Path(dirpath) / f
+            ext = file_path.suffix.lower()
+            
+            if ext == '.prisma':
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as file:
+                        content = file.read()
+                        matches = prisma_model_pattern.findall(content)
+                        for model_name, body in matches:
+                            schemas_found.append(f"Prisma Model: {model_name}\nFields: {body.strip().split(chr(10))[0]}...")
+                except Exception:
+                    pass
+            
+            elif ext == '.py':
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as file:
+                        content = file.read()
+                        if 'Base' in content or 'Model' in content or 'models.' in content:
+                            classes = py_class_pattern.findall(content)
+                            tables = py_table_pattern.findall(content)
+                            if classes or tables:
+                                schemas_found.append(f"Python Models in {file_path.name}: Classes={classes}, Tables={tables}")
+                except Exception:
+                    pass
+                    
+            elif ext in {'.js', '.ts'}:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as file:
+                        content = file.read()
+                        matches = mongoose_pattern.findall(content)
+                        if matches:
+                            schemas_found.append(f"Mongoose Schemas in {file_path.name}: {matches}")
+                except Exception:
+                    pass
+                    
+    if not schemas_found:
+        return "No clear database schemas detected using standard patterns."
+        
+    return "Extracted Database Schemas/Models:\n" + "\n".join(schemas_found)
+
+@tool
+def list_components() -> str:
+    """
+    Scans the repository for frontend components (React, Vue, etc.) and returns a hierarchical or flat list.
+    """
+    import os
+    from pathlib import Path
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+        
+    components = []
+    
+    ignore_dirs = {'.git', 'node_modules', '__pycache__', 'venv', '.openscrum', 'dist', 'build', 'public'}
+    
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith('.')]
+        
+        rel_path = os.path.relpath(dirpath, workspace_root)
+        
+        for f in filenames:
+            file_path = Path(dirpath) / f
+            ext = file_path.suffix.lower()
+            
+            # Vue files
+            if ext == '.vue':
+                components.append(f"Vue Component: {f} (in {rel_path})")
+                
+            # React files (typically starts with uppercase or is in components folder)
+            elif ext in {'.jsx', '.tsx'}:
+                if f[0].isupper() or 'component' in rel_path.lower():
+                    components.append(f"React Component: {f} (in {rel_path})")
+                    
+    if not components:
+        return "No clear frontend components detected."
+        
+    return "Extracted Frontend Components:\n" + "\n".join(components)
+
+@tool
+def list_services() -> str:
+    """
+    Scans the repository for business logic / service files and returns a list.
+    """
+    import os
+    from pathlib import Path
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return "Error: No workspace context available"
+        
+    services = []
+    
+    ignore_dirs = {'.git', 'node_modules', '__pycache__', 'venv', '.openscrum', 'dist', 'build'}
+    
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith('.')]
+        
+        rel_path = os.path.relpath(dirpath, workspace_root)
+        
+        for f in filenames:
+            if 'service' in f.lower() or 'service' in rel_path.lower() or 'controller' in f.lower() or 'manager' in f.lower():
+                services.append(f"Service/Controller: {f} (in {rel_path})")
+                
+    if not services:
+         return "No files explicitly named as services/controllers detected."
+         
+    return "Extracted Services & Controllers:\n" + "\n".join(services)
+
+@tool
+def generate_design_from_code(doc_type: str) -> str:
+    """
+    Automatically generates missing design documentation based on the existing codebase.
+    Supported doc_types: functionalities, tech_stack, database_design, user_flow, architecture, api_design, requirements
+    """
+    import json
+    # Use existing tools to gather context
+    context = ""
+    
+    if doc_type in ['api_design', 'architecture', 'functionalities', 'tech_stack']:
+        context += "\n--- API Routes ---\n" + extract_api_routes()
+    
+    if doc_type in ['database_design', 'architecture', 'functionalities']:
+        context += "\n--- Database Schemas ---\n" + extract_db_schemas()
+        
+    if doc_type in ['architecture', 'user_flow', 'functionalities', 'tech_stack']:
+        context += "\n--- Components ---\n" + list_components()
+        context += "\n--- Services ---\n" + list_services()
+        
+    # We will just return the gathered context and prompt the LLM to write it out.
+    # The actual LLM agent will receive this string and use it to formulate the final design.
+    return f"Codebase Context for {doc_type}:\n\n{context}\n\nINSTRUCTION: Please use the above extracted information from the codebase to write a comprehensive '{doc_type}.md' design document. CRITICAL: You MUST strictly reflect ONLY the current state of the code. NO MORE NO LESS. Do NOT add missing features or omit existing ones. Call the 'design_write' tool with your generated markdown."
+
+
+# ============================================================================
+# Sync Tracking Tools
+# ============================================================================
+
+def get_sync_metadata_path() -> Path:
+    import json
+    workspace_root = get_workspace_root()
+    return Path(workspace_root) / ".openscrum" / "sync_metadata.json"
+
+def load_sync_metadata() -> dict:
+    import json
+    from datetime import datetime
+    
+    metadata_path = get_sync_metadata_path()
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+            
+    # Default initial state
+    return {
+        "design_docs_last_synced": 0,
+        "code_last_modified": 0,
+        "sync_warnings": [],
+        "last_check": datetime.utcnow().isoformat()
+    }
+
+def save_sync_metadata(metadata: dict) -> None:
+    import json
+    metadata_path = get_sync_metadata_path()
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2)
+
+@tool
+def check_sync_status() -> str:
+    """
+    Checks the sync status between design documents and code files.
+    Returns a JSON string containing the sync status, metadata, and any warnings.
+    """
+    import json
+    import os
+    from datetime import datetime
+    
+    workspace_root = get_workspace_root()
+    if not workspace_root:
+        return json.dumps({"error": "No workspace context available"})
+        
+    # Analyze the workspace to get current timestamps
+    analysis_raw = analyze_workspace.invoke({})
+    try:
+        analysis = json.loads(analysis_raw)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Failed to analyze workspace"})
+        
+    latest_code_timestamp = analysis.get("latest_code_timestamp", 0)
+    latest_design_timestamp = analysis.get("latest_design_timestamp", 0)
+    has_code = analysis.get("has_code", False)
+    has_design_docs = analysis.get("has_design_docs", False)
+    
+    metadata = load_sync_metadata()
+    warnings = []
+    
+    # 1. Compare codebase timestamp to design docs timestamp
+    # If code was modified AFTER the design docs were last synced/generated
+    if has_code and has_design_docs:
+        last_synced = metadata.get("design_docs_last_synced", 0)
+        needs_sync_physical = analysis.get("needs_sync", False)
+        
+        if needs_sync_physical:
+            warnings.append({
+                "type": "code_modified_after_design",
+                "message": "Code has been modified since design documents were last updated.",
+                "severity": "warning"
+            })
+        elif last_synced > 0 and latest_code_timestamp > last_synced:
+            warnings.append({
+                "type": "code_modified_after_design",
+                "message": "Code has been modified since the last sync.",
+                "severity": "warning"
+            })
+            
+    # 2. Check for missing design docs if we have a lot of code
+    code_file_count = analysis.get("code_file_count", 0)
+    if code_file_count > 5 and not has_design_docs:
+        warnings.append({
+            "type": "missing_design_docs",
+            "message": "Project has codebase but no design documents.",
+            "severity": "info"
+        })
+        
+    metadata["code_last_modified"] = latest_code_timestamp
+    metadata["sync_warnings"] = warnings
+    metadata["last_check"] = datetime.utcnow().isoformat()
+    
+    # Do not save metadata just from checking it. Only save when we actually `sync`.
+    # But return it for the UI
+    
+    status = {
+        "is_synced": len(warnings) == 0,
+        "warnings": warnings,
+        "metadata": metadata,
+        "workspace_analysis": analysis
+    }
+    
+    return json.dumps(status)
+
+# ============================================================================
 # Export all tools
 # ============================================================================
 
@@ -1452,4 +1945,11 @@ __all__ = [
     'design_update_section',
     'plan_exit',
     'plan_enter',
+    'analyze_workspace',
+    'scan_codebase',
+    'extract_api_routes',
+    'extract_db_schemas',
+    'list_components',
+    'list_services',
+    'generate_design_from_code',
 ]

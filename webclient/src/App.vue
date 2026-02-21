@@ -16,8 +16,23 @@
             <span v-if="modelName" class="text-sm text-text-muted">
               {{ modelName }}
             </span>
-            <span v-if="currentSession" class="text-xl font-semibold text-cyan-400">
+            <span v-if="currentSession" class="text-xl font-semibold text-cyan-400 flex items-center gap-3">
               {{ sessionDisplayName }}
+              
+              <!-- Workspace Status Indicator -->
+              <div v-if="workspaceStatus" class="flex items-center gap-2 text-xs font-normal tracking-wide">
+                <span class="px-2 py-1 rounded bg-surface-dark text-text-muted border border-surface" v-if="workspaceStatus.has_code || workspaceStatus.has_design_docs">
+                  <span v-if="workspaceStatus.has_code">{{ workspaceStatus.code_file_count }} files</span>
+                  <span v-if="workspaceStatus.has_code && workspaceStatus.has_design_docs"> | </span>
+                  <span v-if="workspaceStatus.has_design_docs">{{ workspaceStatus.design_doc_count }} docs</span>
+                </span>
+                <span class="px-2 py-1 rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20" v-if="workspaceStatus.needs_sync" title="Code and design docs might be out of sync">
+                  ⚠️ Needs Sync
+                </span>
+                <span class="px-2 py-1 rounded bg-green-500/10 text-green-400 border border-green-500/20" v-if="!workspaceStatus.has_code && !workspaceStatus.has_design_docs">
+                  🌱 Empty Workspace
+                </span>
+              </div>
             </span>
           </div>
           <div class="flex items-center gap-4">
@@ -182,13 +197,28 @@
 
         <!-- Center Pane - Progress/Plan Display or Design Docs (30%) -->
         <div class="flex flex-col bg-surface/50 border-r border-surface-dark" :style="{ width: centerPaneWidth + '%' }">
+          <!-- Sync Warning Banner -->
+          <SyncWarningBanner
+            v-if="mode === 'plan' && syncStatus?.warnings?.length > 0"
+            :warnings="syncStatus.warnings"
+            :isSyncing="isSending"
+            @trigger-sync="handleSyncWorkspace"
+            class="mx-4 mt-4"
+          />
+
           <!-- Plan Mode: Design Document List -->
           <div v-if="mode === 'plan'" class="h-full">
             <DesignDocList
+              v-if="hasAnyDesignDocs"
               :documents="designDocuments"
               :selectedDoc="selectedDesignDoc"
               @select="handleSelectDesignDoc"
             />
+            <div v-else class="flex flex-col items-center justify-center h-full text-text-muted px-4 p-8 text-center space-y-4">
+              <div class="text-4xl text-surface-dark mt-4">📋</div>
+              <h3 class="text-sm font-medium text-text-inverse">Getting Started</h3>
+              <p class="text-xs">Ask the agent to design your app. It will analyze your workspace and create the architecture documents here.</p>
+            </div>
           </div>
           
           <!-- Edit Mode: Progress Tracker -->
@@ -221,11 +251,15 @@
           <!-- Plan Mode: Design Document Viewer -->
           <div v-if="mode === 'plan'" class="h-full">
             <DesignDocViewer
+              v-if="hasAnyDesignDocs"
               :docType="selectedDesignDoc"
               :docInfo="designDocInfo"
               :content="selectedDesignDocContent"
               @save="handleSaveDesignDoc"
             />
+            <div v-else class="flex flex-col items-center justify-center h-full bg-surface-dark border-b border-surface">
+              <!-- Empty Right Pane -->
+            </div>
           </div>
           
           <!-- Edit Mode: Tool List and Output (Split view) -->
@@ -293,6 +327,7 @@ import ToolList from './components/ToolList.vue'
 import ToolOutput from './components/ToolOutput.vue'
 import DesignDocList from './components/DesignDocList.vue'
 import DesignDocViewer from './components/DesignDocViewer.vue'
+import SyncWarningBanner from './components/SyncWarningBanner.vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
@@ -310,6 +345,9 @@ const {
   resetContext,
   resetSession,
   getTokenUsage,
+  analyzeWorkspace,
+  fetchSyncStatus,
+  triggerWorkspaceSync,
   sessionId,
   modelName 
 } = useApiClient()
@@ -348,6 +386,9 @@ const isSending = ref(false)
 const inputRef = ref(null)
 const showSessionSelector = ref(false)
 const currentSession = ref(null)
+const workspaceStatus = ref(null)
+const syncStatus = ref(null)
+const isSyncing = ref(false)
 const isInitializing = ref(true)
 const pendingPermission = ref(null)
 const permissionResolve = ref(null)
@@ -357,8 +398,13 @@ const pendingQuestionData = ref(null)
 const designDocuments = ref({})
 const selectedDesignDoc = ref(null)
 const selectedDesignDocContent = ref(null)
-const designDocInfo = ref(null)
-const autoSaveTimer = ref(null)
+const designDocInfo = ref({ name: '', description: '' })
+
+// Computed property to check if any design docs actually exist
+const hasAnyDesignDocs = computed(() => {
+  if (!designDocuments.value) return false
+  return Object.values(designDocuments.value).some(doc => doc.exists)
+})
 
 // Session state tracking - persisted across reloads
 // States: 'idle' | 'thinking' | 'working' | 'waiting_permission' | 'executing_tool'
@@ -1774,7 +1820,25 @@ const sendMessage = async () => {
     inputRef.value?.focus()
     // Update token usage after sending message
     await fetchTokenUsage()
+    
+    // Check sync status after agent responds in case it changed things
+    if (mode.value === 'plan') {
+      try {
+        syncStatus.value = await fetchSyncStatus(sessionId.value)
+      } catch (e) {
+        console.error('Failed to update sync status', e)
+      }
+    }
   }
+}
+
+const handleSyncWorkspace = async () => {
+  if (!sessionId.value || isSending.value) return
+  
+  // We trigger the agent to perform the actual reverse engineering
+  // by sending an explicit instruction on the user's behalf.
+  inputMessage.value = "The codebase is out of sync with the design documents. Please review the codebase and rewrite all design documents to accurately reflect the current code. Use your scanning tools."
+  await sendMessage()
 }
 
 const handlePermissionRequest = async (perm) => {
@@ -1846,6 +1910,14 @@ const handleSelectSession = async (id) => {
     setSession(id)
     currentSession.value = session
     showSessionSelector.value = false
+    
+    // Fetch workspace status
+    try {
+      workspaceStatus.value = await analyzeWorkspace(id)
+      syncStatus.value = await fetchSyncStatus(id)
+    } catch (e) {
+      console.error('Failed to get workspace/sync status', e)
+    }
     
     // Clear tool executions for new session
     toolExecutions.value = []
@@ -1952,7 +2024,7 @@ const handleSelectSession = async (id) => {
   }
 }
 
-const handleCreateSession = (payload) => {
+const handleCreateSession = async (payload) => {
   const payloadIsObj = payload && typeof payload === 'object' && !Array.isArray(payload)
   const session = payloadIsObj ? payload.session : payload
   const sessionName = payloadIsObj ? payload.sessionName : null
@@ -1978,6 +2050,16 @@ const handleCreateSession = (payload) => {
     console.log('[Design] Loading design documents for new session (mode is plan)')
     fetchDesignDocuments()
   }
+
+  // Fetch workspace status
+  if (sessionId.value) {
+    try {
+      workspaceStatus.value = await analyzeWorkspace(sessionId.value)
+      syncStatus.value = await fetchSyncStatus(sessionId.value)
+    } catch (e) {
+      console.error('Failed to get workspace/sync status', e)
+    }
+  }
 }
 
 const initializeSession = async () => {
@@ -1991,6 +2073,14 @@ const initializeSession = async () => {
       try {
         const session = await getSession(sessionId.value)
         currentSession.value = session
+        
+        // Fetch workspace status
+        try {
+          workspaceStatus.value = await analyzeWorkspace(sessionId.value)
+          syncStatus.value = await fetchSyncStatus(sessionId.value)
+        } catch (e) {
+          console.error('Failed to get workspace/sync status', e)
+        }
         
         // Load message history
         try {

@@ -25,6 +25,8 @@ from .system_tools import (
     lsp,
     plan_exit,
     plan_enter,
+    analyze_workspace,
+    check_sync_status,
 )
 
 __all__ = [
@@ -48,4 +50,6 @@ __all__ = [
     'lsp',
     'plan_exit',
     'plan_enter',
+    'analyze_workspace',
+    'check_sync_status',
 ]

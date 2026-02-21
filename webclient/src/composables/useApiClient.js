@@ -77,20 +77,20 @@ export function useApiClient() {
       if (!sessionTitle) {
         throw new Error('Session title is required')
       }
-      
+
       const data = {
         title: sessionTitle,
       }
-      
+
       // workspace_name is kept for API compatibility but ignored by server
       if (workspaceName) {
         data.workspace_name = workspaceName
       }
-      
+
       const response = await client.post('/sessions', data, {
         headers: { 'Content-Type': 'application/json' },
       })
-      
+
       const newSessionId = response.data.id
       sessionId.value = newSessionId
       saveSessionId(newSessionId)
@@ -248,6 +248,47 @@ export function useApiClient() {
     }
   }
 
+  const analyzeWorkspace = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}/workspace/analyze`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to analyze workspace:', error)
+      return {
+        has_code: false,
+        has_design_docs: false,
+        error: error.message
+      }
+    }
+  }
+
+  const fetchSyncStatus = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}/workspace/sync-status`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to get workspace sync status:', error)
+      return {
+        is_synced: false,
+        warnings: [],
+        error: error.message
+      }
+    }
+  }
+
+  const triggerWorkspaceSync = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/workspace/sync`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to trigger workspace sync:', error)
+      return {
+        success: false,
+        error: error.message
+      }
+    }
+  }
+
   return {
     health,
     listSessions,
@@ -262,6 +303,9 @@ export function useApiClient() {
     resetContext,
     resetSession,
     getTokenUsage,
+    analyzeWorkspace,
+    fetchSyncStatus,
+    triggerWorkspaceSync,
     sessionId,
     modelName,
   }
