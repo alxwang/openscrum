@@ -50,11 +50,11 @@
           No sessions found
         </div>
         <div v-else class="space-y-2">
-          <button
+          <div
             v-for="session in sessions"
             :key="session.id"
             @click="handleSelectSession(session)"
-            class="w-full text-left p-4 bg-surface-dark rounded-lg hover:bg-surface-dark/80 transition-colors border border-surface-dark hover:border-accent"
+            class="w-full text-left p-4 bg-surface-dark rounded-lg hover:bg-surface-dark/80 transition-colors border border-surface-dark hover:border-accent cursor-pointer"
           >
             <div class="flex items-center justify-between">
               <div class="flex-1">
@@ -63,10 +63,51 @@
                   {{ formatDate(session.time?.updated || session.time?.created) }}
                 </div>
               </div>
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-              </svg>
+              <div class="flex items-center space-x-2">
+                <button 
+                  @click.stop="handleDeleteSession(session)"
+                  :disabled="isDeleting === session.id"
+                  class="p-2 text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"
+                  title="Delete Session"
+                >
+                  <svg v-if="isDeleting === session.id" class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <svg v-else xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                  </svg>
+                </button>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirm Delete Modal -->
+    <div v-if="sessionToDelete" class="fixed inset-0 bg-black/80 flex items-center justify-center z-[60]" @click.self="!isDeleting && (sessionToDelete = null)">
+      <div class="bg-surface-dark border border-red-500/50 rounded-lg p-6 max-w-md w-full mx-4 shadow-2xl">
+        <div class="flex items-center gap-3 text-red-400 mb-4">
+          <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <h3 class="text-xl font-bold">Delete Session?</h3>
+        </div>
+        <p class="text-text-regular mb-6">
+          Are you sure you want to completely delete <strong>{{ sessionToDelete.title || sessionToDelete.id }}</strong>?
+          <br><br>
+          This will permanently destroy the API records, LLM conversation memory log, and the physical workspace directory containing all traced code.
+        </p>
+        <div class="flex justify-end gap-3">
+          <button @click="sessionToDelete = null" :disabled="isDeleting" class="px-4 py-2 bg-surface text-text-inverse rounded hover:bg-surface-light transition-colors">
+            Cancel
+          </button>
+          <button @click="confirmDelete" :disabled="isDeleting" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded font-medium transition-colors">
+            {{ isDeleting ? 'Deleting...' : 'Permanently Delete' }}
           </button>
         </div>
       </div>
@@ -85,14 +126,16 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['select', 'create', 'close'])
+const emit = defineEmits(['select', 'create', 'close', 'delete'])
 
-const { listSessions, createSession } = useApiClient()
+const { listSessions, createSession, deleteSession } = useApiClient()
 
 const sessions = ref([])
 const isLoading = ref(true)
 const newSessionName = ref('')
 const isCreating = ref(false)
+const isDeleting = ref(null)
+const sessionToDelete = ref(null)
 
 const handleClose = () => {
   if (props.canClose) {
@@ -143,6 +186,31 @@ const handleCreateSession = async () => {
     alert('Failed to create session: ' + error.message)
   } finally {
     isCreating.value = false
+  }
+}
+
+const handleDeleteSession = (session) => {
+  if (isDeleting.value) return
+  sessionToDelete.value = session
+}
+
+const confirmDelete = async () => {
+  if (!sessionToDelete.value || isDeleting.value) return
+
+  const session = sessionToDelete.value
+  isDeleting.value = session.id
+  try {
+    await deleteSession(session.id)
+    // Remove from local list
+    sessions.value = sessions.value.filter(s => s.id !== session.id)
+    // Inform parent component it was deleted in case it requires reset
+    emit('delete', session.id)
+    sessionToDelete.value = null
+  } catch (error) {
+    console.error('Failed to delete session:', error)
+    alert('Failed to delete session: ' + error.message)
+  } finally {
+    isDeleting.value = null
   }
 }
 

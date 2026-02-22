@@ -60,6 +60,26 @@ export function useApiClient() {
     }
   }
 
+  const updateSession = async (id, updates) => {
+    try {
+      const response = await client.patch(`/sessions/${id}`, updates)
+      return response.data
+    } catch (error) {
+      console.error('Failed to update session:', error)
+      throw error
+    }
+  }
+
+  const deleteSession = async (id) => {
+    try {
+      const response = await client.delete(`/sessions/${id}`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to delete session:', error)
+      throw error
+    }
+  }
+
   const getSession = async (id) => {
     try {
       const response = await client.get(`/sessions/${id}`)
@@ -316,6 +336,19 @@ export function useApiClient() {
     }
   }
 
+  const saveWorkspaceFile = async (id, path, content) => {
+    try {
+      const response = await client.put(`/sessions/${id}/workspace/file`, {
+        path,
+        content
+      })
+      return response.data
+    } catch (error) {
+      console.error('Failed to save workspace file:', error)
+      throw error
+    }
+  }
+
   const fetchTodos = async (id) => {
     try {
       const response = await client.get(`/sessions/${id}/todo`)
@@ -349,6 +382,8 @@ export function useApiClient() {
   return {
     health,
     listSessions,
+    updateSession,
+    deleteSession,
     getSession,
     getSessionMessages,
     createSession,
@@ -365,6 +400,7 @@ export function useApiClient() {
     triggerWorkspaceSync,
     fetchWorkspaceTree,
     fetchWorkspaceFile,
+    saveWorkspaceFile,
     fetchTodos,
     updateTodos,
     generateTodos,

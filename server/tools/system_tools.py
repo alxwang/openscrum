@@ -1298,6 +1298,26 @@ def design_write(doc_type: str, content: str) -> str:
     
     _log.info(f"[design_write] Wrote {len(content)} chars to: {doc_path}")
     
+    # -----------------------------------------------------
+    # Update sync metadata so check_sync_status clears the warning
+    # -----------------------------------------------------
+    try:
+        from datetime import datetime
+        metadata = load_sync_metadata()
+        metadata["design_docs_last_synced"] = datetime.utcnow().timestamp()
+        
+        # Analyze workspace to properly record the latest code timestamp 
+        # so check_sync doesn't think the code drifted immediately.
+        import json
+        analysis_raw = analyze_workspace.invoke({})
+        analysis = json.loads(analysis_raw)
+        metadata["code_last_modified"] = analysis.get("latest_code_timestamp", 0)
+        
+        save_sync_metadata(metadata)
+        _log.info(f"[design_write] Updated sync_metadata successfully.")
+    except Exception as e:
+        _log.warning(f"[design_write] Failed to update sync metadata: {e}")
+        
     return f"✓ Updated {DESIGN_DOC_TYPES[doc_type]['name']} document at: {doc_path}"
 
 
@@ -1924,7 +1944,7 @@ def check_sync_status() -> str:
                 "message": "Code has been modified since design documents were last updated.",
                 "severity": "warning"
             })
-        elif last_synced > 0 and latest_code_timestamp > last_synced:
+        elif last_synced > 0 and latest_code_timestamp > last_synced and latest_code_timestamp > latest_design_timestamp:
             warnings.append({
                 "type": "code_modified_after_design",
                 "message": "Code has been modified since the last sync.",

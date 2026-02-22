@@ -237,10 +237,38 @@ class Session:
         return result
 
     def remove(self, session_id: str) -> None:
-        """Delete session and all its messages/parts. Ref: Session.remove."""
-        session = self.get(session_id)
+        """Delete session and all its messages/parts, as well as physical workspace and memory. Ref: Session.remove."""
+        import shutil
+        from pathlib import Path
+        
+        try:
+            session = self.get(session_id)
+            
+            # 1. Delete the physical workspace directory
+            workspace_dir = session.get("directory")
+            if workspace_dir and Path(workspace_dir).exists():
+                try:
+                    shutil.rmtree(workspace_dir)
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to delete workspace directory {workspace_dir}: {e}")
+                    
+            # 2. Delete the physical semantic memory logs
+            memory_dir = Path.home() / ".openscrum" / "memory" / session_id
+            if memory_dir.exists():
+                try:
+                    shutil.rmtree(memory_dir)
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to delete memory directory {memory_dir}: {e}")
+                    
+        except NotFoundError:
+            pass # Session already gone or invalid, safe to proceed with DB cleanup
+
+        # Also remove children
         for child in self.children(session_id):
             self.remove(child["id"])
+            
         msg_prefix = ["message", session_id]
         for key in self._storage.list(msg_prefix):
             # key = ["message", session_id, message_id]
@@ -249,6 +277,8 @@ class Session:
                 for part_key in self._storage.list(["part", msg_id]):
                     self._storage.remove(part_key)
             self._storage.remove(key)
+            
+        # Remove the session database entry
         self._storage.remove(["session", DEFAULT_PROJECT_ID, session_id])
         SessionStatus.set(session_id, {"type": "idle"})
 

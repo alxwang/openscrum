@@ -63,7 +63,9 @@
             class="px-4 py-3 transition-colors duration-200 cursor-pointer relative group"
             :class="[
               getStepBackgroundClass(todo),
-              selectedId === todo.id ? 'bg-surface ring-1 ring-inset ring-surface-dark' : 'hover:bg-surface/50'
+              todo.status === 'in_progress' 
+                ? 'hover:bg-gray-700/80' 
+                : (selectedId === todo.id ? 'bg-surface ring-1 ring-inset ring-surface-dark' : 'hover:bg-surface/50')
             ]"
             @click="selectedId = selectedId === todo.id ? null : todo.id"
           >
@@ -89,7 +91,10 @@
                     <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
                   </svg>
                   <div v-else-if="todo.status === 'in_progress'" class="flex items-center justify-center">
-                    <div class="w-2.5 h-2.5 bg-accent rounded-full animate-pulse"></div>
+                    <svg class="animate-spin h-3.5 w-3.5 text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
                   </div>
                   <span v-else class="text-[10px] font-medium text-text-muted">{{ todo.id }}</span>
                 </div>
@@ -99,7 +104,7 @@
               <div class="flex-1 min-w-0">
                 <p 
                   class="text-sm font-medium pr-4" 
-                  :class="todo.status === 'completed' ? 'text-text-muted line-through opacity-70' : (todo.status === 'in_progress' ? 'text-text-inverse' : 'text-gray-400')"
+                  :class="todo.status === 'completed' ? 'text-gray-500 line-through opacity-70' : (todo.status === 'in_progress' ? 'text-text-inverse' : 'text-gray-800')"
                 >
                   {{ todo.content }}
                 </p>
@@ -108,7 +113,9 @@
                 <div v-if="selectedId === todo.id" class="mt-3 flex gap-2">
                   <button 
                     @click.stop="$emit('process', todo)"
-                    class="px-3 py-1.5 bg-accent text-white rounded text-xs hover:bg-accent/90 transition-colors flex items-center gap-1.5"
+                    :disabled="isAnyTaskProcessing"
+                    class="px-3 py-1.5 rounded text-xs transition-colors flex items-center gap-1.5"
+                    :class="isAnyTaskProcessing ? 'bg-surface-dark text-text-muted cursor-not-allowed opacity-50' : 'bg-accent text-white hover:bg-accent/90'"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -116,6 +123,7 @@
                     </svg>
                     Process Task
                   </button>
+                  <span v-if="isAnyTaskProcessing && todo.status !== 'in_progress'" class="text-xs text-yellow-500 self-center ml-2">Another task is currently processing</span>
                 </div>
                 
                 <!-- Active Step Details (only for in_progress items from tracker progress) -->
@@ -179,6 +187,11 @@ const sortedTodos = computed(() => {
 const status = computed(() => props.currentProgress?.status || '')
 const nextStep = computed(() => props.currentProgress?.next_step || '')
 
+// Determine if ANY task is currently processing anywhere in the list
+const isAnyTaskProcessing = computed(() => {
+  return props.todos && props.todos.some(t => t.status === 'in_progress')
+})
+
 // Check if status indicates active work
 const isActiveStatus = computed(() => {
   if (!status.value) return false
@@ -197,7 +210,7 @@ const progressPercentage = computed(() => {
 })
 
 const getStepBackgroundClass = (todo) => {
-  if (todo.status === 'in_progress') return 'bg-accent/5'
+  if (todo.status === 'in_progress') return 'bg-gray-800/80 ring-1 ring-inset ring-accent shadow-inner'
   if (todo.status === 'completed') return 'opacity-60 bg-transparent'
   return 'bg-transparent'
 }

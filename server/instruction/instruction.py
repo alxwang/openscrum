@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
-INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"]
+INSTRUCTION_FILES = ["Agent.md", "AGENTS.md", "CLAUDE.md"]
 
 
 def _global_config_dir() -> Path:

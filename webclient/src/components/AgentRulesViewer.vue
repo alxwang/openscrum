@@ -1,20 +1,12 @@
 <template>
-  <div class="design-doc-viewer h-full flex flex-col bg-surface-dark">
+  <div class="agent-rules-viewer h-full flex flex-col bg-surface-dark">
     <!-- Header with edit controls -->
     <div class="px-4 py-3 border-b border-surface flex items-center justify-between bg-surface">
       <div>
-        <h3 class="text-sm font-semibold text-text-inverse">{{ docInfo?.name || 'Select a document' }}</h3>
-        <p v-if="docInfo" class="text-xs text-text-muted mt-0.5">{{ docInfo.description }}</p>
+        <h3 class="text-sm font-semibold text-text-inverse">Agent.md (Custom Rules)</h3>
+        <p class="text-xs text-text-muted mt-0.5">Define custom instructions for the agent in this workspace.</p>
       </div>
-      <div v-if="hasContent" class="flex items-center gap-2">
-        <button
-          v-if="!isEditing"
-          @click="$emit('sync', docType)"
-          class="px-3 py-1.5 text-xs rounded-lg bg-surface-dark hover:bg-surface transition-colors"
-          title="Update this document from the codebase"
-        >
-          Sync
-        </button>
+      <div class="flex items-center gap-2">
         <button
           v-if="!isEditing"
           @click="startEditing"
@@ -37,25 +29,22 @@
             Save
           </button>
         </template>
-        <button
-          @click="$emit('close')"
-          class="ml-2 px-2 py-1.5 text-xs rounded-lg text-text-muted hover:text-text-inverse hover:bg-surface-dark transition-colors border border-transparent"
-          title="Close"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
       </div>
     </div>
     
     <!-- Content area -->
     <div class="flex-1 overflow-hidden">
       <!-- Empty state -->
-      <div v-if="!hasContent" class="flex items-center justify-center h-full text-text-muted px-4">
+      <div v-if="!hasContent || content.trim() === ''" class="flex items-center justify-center h-full text-text-muted px-4">
         <div class="text-center max-w-md">
-          <p class="text-sm">{{ docType ? 'This document hasn\'t been created yet.' : 'Select a document from the list to view or edit.' }}</p>
-          <p v-if="docType" class="text-xs mt-2">Ask the agent to create it using the design_create tool.</p>
+          <p class="text-sm">No custom rules defined yet.</p>
+          <p class="text-xs mt-2 mb-4">Click below to generate a starting template for your workspace.</p>
+          <button
+            @click="prefillTemplate"
+            class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-white transition-colors"
+          >
+            Prefill Best Practices
+          </button>
         </div>
       </div>
       
@@ -102,27 +91,19 @@ marked.setOptions({
 })
 
 const props = defineProps({
-  docType: {
-    type: String,
-    default: null
-  },
-  docInfo: {
-    type: Object,
-    default: null
-  },
   content: {
     type: String,
-    default: null
+    default: ''
   }
 })
 
-const emit = defineEmits(['save', 'sync', 'close'])
+const emit = defineEmits(['save'])
 
 const isEditing = ref(false)
 const editContent = ref('')
 const originalContent = ref('')
 
-const hasContent = computed(() => props.content !== null && props.content !== undefined)
+const hasContent = computed(() => !!props.content && props.content.trim() !== '')
 const hasChanges = computed(() => editContent.value !== originalContent.value)
 
 const renderedContent = computed(() => {
@@ -143,11 +124,6 @@ watch(() => props.content, (newContent) => {
   }
 }, { immediate: true })
 
-// Watch for doc type changes
-watch(() => props.docType, () => {
-  isEditing.value = false
-})
-
 const startEditing = () => {
   editContent.value = props.content || ''
   originalContent.value = props.content || ''
@@ -165,13 +141,29 @@ const saveChanges = () => {
     return
   }
   
-  emit('save', {
-    docType: props.docType,
-    content: editContent.value
-  })
+  emit('save', editContent.value)
   
   originalContent.value = editContent.value
   isEditing.value = false
+}
+
+const prefillTemplate = () => {
+  const template = `# OpenScrum Agent Rules
+
+These rules apply to the agent when operating in **Edit Mode** within this workspace.
+
+## Coding Standards
+1. Use semantic HTML and modern CSS (flexbox/grid).
+2. Prefer composition over inheritance.
+3. Write self-documenting code with clear variable names.
+
+## Verification
+- Always test your changes if a test runner is available.
+- Verify UI changes visually if applicable.`
+  
+  editContent.value = template
+  originalContent.value = template
+  emit('save', template)
 }
 </script>
 

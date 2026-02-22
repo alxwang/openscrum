@@ -84,7 +84,7 @@ Git Safety Protocol:
 
 Important notes:
 - NEVER run additional commands to read or explore code, besides git bash commands
-- NEVER use the TodoWrite or Task tools
+- NEVER use the Task tool
 - DO NOT push to the remote repository unless the user explicitly asks you to do so
 - **CRITICAL: Never use interactive commands** - The following commands will hang or fail because they require user input:
   - Git: `git rebase -i`, `git add -i`, `git add -p`, `git commit` (without -m)
@@ -116,7 +116,7 @@ gh pr create --title "the pr title" --body "$(cat <<'EOF'
 </example>
 
 Important:
-- DO NOT use the TodoWrite or Task tools
+- DO NOT use the Task tool
 - Return the PR URL when you're done, so the user can see it
 
 # Other common operations

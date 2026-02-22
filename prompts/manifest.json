@@ -7,27 +7,21 @@
   "WEBSEARCH_TOOL_DESCRIPTION": {
     "path": "prompts/tool/websearch.txt",
     "description": "Tool description for the WebSearch tool that performs real-time web searches using Exa AI",
-    "variables": ["date"]
+    "variables": [
+      "date"
+    ]
   },
   "WEBFETCH_TOOL_DESCRIPTION": {
     "path": "prompts/tool/webfetch.txt",
     "description": "Tool description for the WebFetch tool that fetches content from URLs",
     "variables": []
   },
-  "TODOWRITE_TOOL_DESCRIPTION": {
-    "path": "prompts/tool/todowrite.txt",
-    "description": "Tool description for the TodoWrite tool that manages structured task lists",
-    "variables": []
-  },
-  "TODOREAD_TOOL_DESCRIPTION": {
-    "path": "prompts/tool/todoread.txt",
-    "description": "Tool description for the TodoRead tool that reads the current todo list",
-    "variables": []
-  },
   "TASK_TOOL_DESCRIPTION": {
     "path": "prompts/tool/task.txt",
     "description": "Tool description for the Task tool that launches subagents for complex multistep tasks",
-    "variables": ["agents"]
+    "variables": [
+      "agents"
+    ]
   },
   "QUESTION_TOOL_DESCRIPTION": {
     "path": "prompts/tool/question.txt",
@@ -87,7 +81,11 @@
   "BASH_TOOL_DESCRIPTION": {
     "path": "prompts/tool/bash.txt",
     "description": "Tool description for the Bash tool that executes bash commands in a persistent shell session",
-    "variables": ["directory", "maxLines", "maxBytes"]
+    "variables": [
+      "directory",
+      "maxLines",
+      "maxBytes"
+    ]
   },
   "APPLY_PATCH_TOOL_DESCRIPTION": {
     "path": "prompts/tool/apply_patch.txt",
@@ -169,11 +167,6 @@
     "description": "System reminder prompt for plan mode (read-only phase)",
     "variables": []
   },
-  "EXECUTION_PROGRESS_SYSTEM_REMINDER": {
-    "path": "prompts/session/prompt/execution-progress.txt",
-    "description": "System reminder prompt for execution mode with progress reporting",
-    "variables": []
-  },
   "PLAN_REMINDER_ANTHROPIC_SYSTEM": {
     "path": "prompts/session/prompt/plan-reminder-anthropic.txt",
     "description": "System reminder prompt for plan mode (Anthropic-specific)",
@@ -192,11 +185,16 @@
   "INITIALIZE_COMMAND_TEMPLATE": {
     "path": "prompts/command/template/initialize.txt",
     "description": "Command template for the 'init' command that creates/updates AGENTS.md",
-    "variables": ["path", "ARGUMENTS"]
+    "variables": [
+      "path",
+      "ARGUMENTS"
+    ]
   },
   "REVIEW_COMMAND_TEMPLATE": {
     "path": "prompts/command/template/review.txt",
     "description": "Command template for the 'review' command that reviews code changes",
-    "variables": ["ARGUMENTS"]
+    "variables": [
+      "ARGUMENTS"
+    ]
   }
 }

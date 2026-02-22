@@ -47,14 +47,14 @@ Rules for updating:
 1. Mark completed steps as 'completed'
 2. If the agent discovers new requirements, add new steps to the end
 3. Identify the current active 'in_progress' step
-4. Steps must have an integer string ID ("1", "2", etc.)
+4. You MUST retain the exact 'id' string for existing steps (they may be UUIDs). DO NOT change existing IDs.
 5. Step statuses: pending, in_progress, completed, cancelled
 
 You MUST output EXACTLY this JSON format:
 {{
   "todos": [
-    {{"id": "1", "content": "Step 1 description", "status": "completed", "priority": "high"}},
-    {{"id": "2", "content": "Step 2 description", "status": "in_progress", "priority": "high"}}
+    {{"id": "a1b2c3d4", "content": "Step 1 description", "status": "completed", "priority": "high"}},
+    {{"id": "e5f6g7h8", "content": "Step 2 description", "status": "in_progress", "priority": "high"}}
   ],
   "status_message": "Brief description of what the agent just accomplished (1-2 sentences)",
   "next_action": "What the agent should do next"
@@ -62,7 +62,7 @@ You MUST output EXACTLY this JSON format:
 """
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", sys_prompt.format(current_todos=json.dumps(current_todos, indent=2))),
+        ("system", sys_prompt),
         MessagesPlaceholder(variable_name="messages")
     ])
     
@@ -76,7 +76,10 @@ You MUST output EXACTLY this JSON format:
         chain = prompt | llm
         
         _log.info("[TodoTracker] Analyzing progress with gpt-5-mini...")
-        res = chain.invoke({"messages": recent_msgs})
+        res = chain.invoke({
+            "messages": recent_msgs,
+            "current_todos": json.dumps(current_todos, indent=2)
+        })
         
         data = json.loads(str(res.content))
         new_todos = data.get("todos", current_todos)

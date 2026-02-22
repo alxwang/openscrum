@@ -300,11 +300,37 @@
           
           <!-- Edit Mode: Split Pane (Console Top, Code Viewer Bottom) -->
           <template v-else-if="mode === 'edit'">
-            <!-- Top Section - Console Viewer -->
+            <!-- Top Section - Console Viewer or Agent Rules -->
             <div class="bg-surface-dark overflow-hidden flex flex-col" :style="{ height: rightTopHeight + '%' }">
-              <div class="h-full bg-white p-2 pb-1">
+              <!-- Tab Bar -->
+              <div class="flex items-center px-4 pt-2 bg-surface border-b border-surface-dark">
+                <button
+                  @click="activeEditTab = 'console'"
+                  class="px-4 py-2 text-sm font-medium transition-colors border-b-2"
+                  :class="activeEditTab === 'console' ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text-inverse'"
+                >
+                  Console
+                </button>
+                <button
+                  @click="switchToAgentRulesTab"
+                  class="px-4 py-2 text-sm font-medium transition-colors border-b-2"
+                  :class="activeEditTab === 'rules' ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text-inverse'"
+                >
+                  Agent Rules
+                </button>
+              </div>
+              
+              <div class="flex-1 bg-white p-2 pb-1 overflow-hidden">
                 <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
-                  <ConsoleViewer ref="consoleViewerRef" :output="consoleOutput" />
+                  <!-- Console Tab -->
+                  <ConsoleViewer v-if="activeEditTab === 'console'" ref="consoleViewerRef" :output="consoleOutput" />
+                  
+                  <!-- Agent Rules Tab -->
+                  <AgentRulesViewer
+                    v-else-if="activeEditTab === 'rules'"
+                    :content="agentRulesContent"
+                    @save="handleSaveAgentRules"
+                  />
                 </div>
               </div>
             </div>
@@ -329,6 +355,15 @@
                       @close="handleCloseCodeFile"
                     />
                   </template>
+                  <DesignDocViewer
+                    v-else-if="selectedDesignDoc"
+                    :docType="selectedDesignDoc"
+                    :docInfo="designDocInfo"
+                    :content="selectedDesignDocContent"
+                    @save="handleSaveDesignDoc"
+                    @sync="handleSyncSingleDoc"
+                    @close="handleCloseDesignDoc"
+                  />
                   <div v-else class="flex flex-col items-center justify-center h-full text-text-muted bg-surface/50">
                     <div class="w-12 h-12 rounded-full bg-surface-dark/50 flex items-center justify-center mb-3">
                       <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -351,6 +386,7 @@
         @select="handleSelectSession"
         @create="handleCreateSession"
         @close="showSessionSelector = false"
+        @delete="handleSessionDeleted"
       />
 
       <!-- Permission Dialog -->
@@ -385,6 +421,7 @@ import FileTree from './components/FileTree.vue'
 import CodeViewer from './components/CodeViewer.vue'
 import TodoList from './components/TodoList.vue'
 import ConsoleViewer from './components/ConsoleViewer.vue'
+import AgentRulesViewer from './components/AgentRulesViewer.vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
@@ -393,6 +430,7 @@ const {
   getSession,
   getSessionMessages,
   setSession,
+  updateSession,
   clearSession,
   sendMessage: apiSendMessage,
   replyToPermission,
@@ -403,6 +441,7 @@ const {
   analyzeWorkspace,
   fetchSyncStatus,
   fetchWorkspaceFile,
+  saveWorkspaceFile,
   fetchTodos,
   updateTodos,
   generateTodos,
@@ -465,6 +504,8 @@ const codeFileError = ref(null)
 // Edit mode state
 const consoleOutput = ref('')
 const consoleViewerRef = ref(null)
+const activeEditTab = ref('console')
+const agentRulesContent = ref('')
 
 // Computed property to check if any design docs actually exist
 const hasAnyDesignDocs = computed(() => {
@@ -670,7 +711,7 @@ const extractProgressData = (content) => {
     try {
       const parsed = JSON.parse(trimmed)
       // Check if it has the progress structure
-      if (parsed.plan && parsed.current_progress) {
+      if ((parsed.plan || parsed.todos) && parsed.current_progress) {
         return parsed
       }
     } catch (e) {
@@ -730,8 +771,8 @@ const extractProgressData = (content) => {
         const jsonStr = jsonCandidate.substring(0, jsonEnd)
         try {
           const parsed = JSON.parse(jsonStr)
-          // Check if it has the progress structure
-          if (parsed.plan && parsed.current_progress) {
+          // Check if it has the progress structure (legacy 'plan' or new 'todos')
+          if ((parsed.plan || parsed.todos) && parsed.current_progress) {
             return parsed
           }
         } catch (e) {
@@ -787,8 +828,8 @@ const extractDisplayContent = (content) => {
       }
       
       // Check for progress structure
-      // Progress JSON from edit mode: {"content": "...", "plan": {...}, "current_progress": {...}}
-      if (parsed.plan && parsed.current_progress) {
+      // Progress JSON from edit mode: {"content": "...", "todos": [...], "current_progress": {...}}
+      if ((parsed.plan || parsed.todos) && parsed.current_progress) {
         console.log('[Display] Detected progress JSON')
         // If there's a content field with meaningful text, return it for chat display
         // Progress tracker will show the plan/progress in center pane
@@ -879,7 +920,16 @@ const extractDisplayContent = (content) => {
             }
           }
           
-          console.log('[Display] Repaired JSON has no content field, hiding')
+          // Check for progress (plan or todos)
+          if ((parsed.plan || parsed.todos) && parsed.current_progress) {
+            console.log('[Display] Found progress in repaired JSON')
+            if (parsed.content && typeof parsed.content === 'string' && parsed.content.trim()) {
+              return parsed.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+            }
+            return ''
+          }
+          
+          console.log('[Display] Repaired JSON has no text content field, hiding')
           return ''
         }
       } catch (e2) {
@@ -1247,6 +1297,10 @@ const handleQuestionSkip = () => {
 const toggleMode = () => {
   const newMode = mode.value === 'plan' ? 'edit' : 'plan'
   mode.value = newMode
+  
+  if (sessionId.value) {
+    updateSession(sessionId.value, { mode: newMode }).catch(e => console.error('Failed to sync mode:', e))
+  }
   
   if (newMode === 'edit' && sessionId.value) {
     loadTodosForEditMode()
@@ -1630,6 +1684,13 @@ const handleSelectCodeFile = async (path) => {
   codeFileError.value = null
   selectedCodeFileContent.value = ''
   
+  // Always handle design docs specially, even in edit mode
+  if (path.startsWith('.openscrum/design/')) {
+    const docType = path.replace('.openscrum/design/', '').replace('.md', '')
+    handleSelectDesignDoc(docType)
+    return
+  }
+  
   try {
     const content = await fetchWorkspaceFile(sessionId.value, path)
     selectedCodeFileContent.value = content
@@ -1638,6 +1699,42 @@ const handleSelectCodeFile = async (path) => {
     codeFileError.value = 'Failed to load code file content.'
   } finally {
     isCodeFileLoading.value = false
+  }
+}
+
+// ============================================================================
+// Agent Rules (Edit Mode)
+// ============================================================================
+
+const fetchAgentRules = async () => {
+  if (!sessionId.value) return
+  try {
+    const content = await fetchWorkspaceFile(sessionId.value, 'Agent.md')
+    if (content) {
+      agentRulesContent.value = content
+    } else {
+      agentRulesContent.value = ''
+    }
+  } catch (error) {
+    console.error('[AgentRules] Failed to fetch Agent.md:', error)
+    agentRulesContent.value = ''
+  }
+}
+
+const switchToAgentRulesTab = () => {
+  activeEditTab.value = 'rules'
+  fetchAgentRules()
+}
+
+const handleSaveAgentRules = async (content) => {
+  if (!sessionId.value) return
+  try {
+    await saveWorkspaceFile(sessionId.value, 'Agent.md', content)
+    agentRulesContent.value = content
+    console.log('[AgentRules] Successfully saved Agent.md')
+  } catch (error) {
+    console.error('[AgentRules] Failed to save Agent.md:', error)
+    alert('Failed to save custom rules. ' + error.message)
   }
 }
 
@@ -1652,6 +1749,11 @@ const handleCloseCodeFile = () => {
       handleSelectDesignDoc(firstDoc)
     }
   }
+}
+
+const handleCloseDesignDoc = () => {
+  selectedDesignDoc.value = null
+  selectedDesignDocContent.value = null
 }
 
 const handleSaveDesignDoc = async ({ docType, content }) => {
@@ -1805,16 +1907,36 @@ const sendMessage = async () => {
           }
           
           // Extract bash command if it's a bash tool call
+          let formattedLog = ''
           if (chunk.tool_name === 'bash' && chunk.tool_input) {
             try {
               const input = typeof chunk.tool_input === 'string' ? JSON.parse(chunk.tool_input) : chunk.tool_input
               const cmd = input.command || null
               updateSessionState('executing_tool', true, 'Agent is working...', chunk.tool_name, cmd)
+              if (cmd) {
+                formattedLog = `\x1b[32m$ ${cmd}\x1b[0m`
+              }
             } catch (e) {
               updateSessionState('executing_tool', true, 'Agent is working...', chunk.tool_name)
+              formattedLog = `\x1b[33m[Executing Tool]\x1b[0m \x1b[36m${chunk.tool_name}\x1b[0m\r\n\x1b[90m${JSON.stringify(chunk.tool_input, null, 2)}\x1b[0m`
             }
           } else {
             updateSessionState('executing_tool', true, 'Agent is working...', chunk.tool_name)
+            
+            // Format non-bash tools clearly in the console
+            let displayInput = chunk.tool_input
+            try {
+              if (typeof chunk.tool_input === 'string') {
+                displayInput = JSON.parse(chunk.tool_input)
+              }
+              displayInput = JSON.stringify(displayInput, null, 2).replace(/\n/g, '\r\n')
+            } catch(e) {}
+            
+            formattedLog = `\x1b[33m[Executing Tool]\x1b[0m \x1b[36m${chunk.tool_name}\x1b[0m\r\n\x1b[90m${displayInput}\x1b[0m`
+          }
+          
+          if (formattedLog) {
+             consoleOutput.value += `\r\n${formattedLog}\r\n`
           }
           console.log('[Stream] Tool call UI updated, state:', sessionState.value)
           await nextTick()
@@ -1825,6 +1947,15 @@ const sendMessage = async () => {
           console.log('[Stream] Permission request, showing dialog')
           // Update state to waiting for permission
           updateSessionState('waiting_permission', true, 'Permission required...', perm.tool || null)
+          
+          let permInput = perm.tool_input || {}
+          try {
+            if (typeof permInput === 'string') permInput = JSON.parse(permInput)
+            permInput = JSON.stringify(permInput, null, 2).replace(/\n/g, '\r\n')
+          } catch(e) {}
+          
+          consoleOutput.value += `\r\n\x1b[31;1m[Permission Required]\x1b[0m \x1b[36m${perm.tool}\x1b[0m\r\n\x1b[90m${permInput}\x1b[0m\r\n`
+          
           await nextTick()
           scrollToBottom()
           
@@ -1850,6 +1981,23 @@ const sendMessage = async () => {
             if (lastTool.status === 'pending') {
               lastTool.output = chunk.tool_output
               lastTool.status = 'completed'
+              
+              // Pipe all tool outputs to the console tab
+              if (chunk.tool_output) {
+                let formattedOutput = String(chunk.tool_output)
+                if (formattedOutput.length > 2000) {
+                   formattedOutput = formattedOutput.substring(0, 2000) + '\n...[output truncated]...'
+                }
+                formattedOutput = formattedOutput.replace(/\r?\n/g, '\r\n')
+                
+                if (lastTool.name === 'bash') {
+                  consoleOutput.value += `${formattedOutput}\r\n`
+                } else {
+                  consoleOutput.value += `\x1b[90m> ${formattedOutput}\x1b[0m\r\n`
+                }
+              } else {
+                consoleOutput.value += `\x1b[90m> [No Output]\x1b[0m\r\n`
+              }
             }
           }
           
@@ -1860,7 +2008,20 @@ const sendMessage = async () => {
           updateSessionState('thinking', true, 'Agent is thinking...')
           console.log('[Stream] Tool result processed, waiting for LLM response')
           await nextTick()
-          scrollToBottom()
+        } else if (chunkType === 'progress') {
+          console.log('[Stream] Received background tracker progress chunk')
+          if (chunk.progress) {
+            latestProgress.value = chunk.progress
+            if (chunk.progress.todos) {
+              todos.value = chunk.progress.todos
+              // Persist the tracker's updated tasks to the backend
+              if (sessionId.value && mode.value === 'edit') {
+                console.log('[Progress] Saving updated todos to backend database')
+                await updateTodos(sessionId.value, chunk.progress.todos)
+              }
+            }
+          }
+          await nextTick()
         } else if (chunkType === 'done') {
           // Use content from done chunk if available (contains complete final response)
           const finalContent = chunk.content || agentContent
@@ -1889,6 +2050,11 @@ const sendMessage = async () => {
               latestProgress.value = progressData
               if (progressData.todos) {
                 todos.value = progressData.todos
+                // Persist the tracker's updated tasks to the database so they survive refresh
+                if (sessionId.value && mode.value === 'edit') {
+                  console.log('[Progress] Saving updated todos to backend database')
+                  await updateTodos(sessionId.value, progressData.todos)
+                }
               }
             }
             
@@ -1969,6 +2135,22 @@ const sendMessage = async () => {
       content: `**Error:** ${error.message}`,
     })
   } finally {
+    // Proactively mark Todo as completed if this was a direct task execution
+    if (mode.value === 'edit' && userMessage.startsWith('Process Todo #')) {
+      const match = userMessage.match(/^Process Todo #([^:]+):/);
+      if (match && match[1]) {
+        const targetId = match[1];
+        const todoIndex = todos.value.findIndex(t => String(t.id) === targetId);
+        if (todoIndex !== -1 && todos.value[todoIndex].status !== 'completed') {
+          console.log(`[Task Completion] Optimistically marking task #${targetId} as completed`);
+          todos.value[todoIndex].status = 'completed';
+          if (sessionId.value) {
+            await updateTodos(sessionId.value, todos.value);
+          }
+        }
+      }
+    }
+
     isSending.value = false
     inputRef.value?.focus()
     // Update token usage after sending message
@@ -1990,14 +2172,14 @@ const handleSyncWorkspace = async () => {
   
   // We trigger the agent to perform the actual reverse engineering
   // by sending an explicit instruction on the user's behalf.
-  inputMessage.value = "The codebase is out of sync with the design documents. Please review the codebase and rewrite all design documents to accurately reflect the current code. Use your scanning tools."
+  inputMessage.value = "The codebase is out of sync with the design documents. Please review the codebase and rewrite all 7 design documents to accurately reflect the current code. Use your scanning tools. CRITICAL: Do NOT do a dry-run or gap analysis. Do NOT ask for confirmation or offer multiple choice options. You MUST invoke the 'design_write' tool sequentially to overwrite and update all design documents immediately in this turn."
   await sendMessage()
 }
 
 const handleSyncSingleDoc = async (docType) => {
   if (!sessionId.value || isSending.value) return
   
-  inputMessage.value = `The codebase might be out of sync. Please review the codebase and rewrite the '${docType}.md' design document to accurately reflect the current code. Use your scanning tools.`
+  inputMessage.value = `The codebase might be out of sync. Please review the codebase and rewrite the '${docType}.md' design document to accurately reflect the current code. Use your scanning tools. CRITICAL: Do NOT do a dry-run. Do NOT ask for confirmation. You MUST use the 'design_write' tool immediately to overwrite this document.`
   await sendMessage()
 }
 
@@ -2064,11 +2246,18 @@ const handleExitSession = () => {
   showSessionSelector.value = true
 }
 
+const handleSessionDeleted = (deletedId) => {
+  if (sessionId.value === deletedId) {
+    handleExitSession()
+  }
+}
+
 const handleSelectSession = async (id) => {
   try {
     const session = await getSession(id)
     setSession(id)
     currentSession.value = session
+    mode.value = session.mode || 'plan'
     showSessionSelector.value = false
     
     // Fetch workspace status
@@ -2236,6 +2425,7 @@ const initializeSession = async () => {
       try {
         const session = await getSession(sessionId.value)
         currentSession.value = session
+        mode.value = session.mode || 'plan'
         
         // Fetch workspace status
         try {

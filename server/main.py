@@ -168,6 +168,15 @@ class CreateSessionRequest(BaseModel):
     title: str | None = None
     parent_id: str | None = None
 
+class UpdateSessionRequest(BaseModel):
+    title: str | None = None
+    mode: str | None = None
+
+class FileUpdateRequest(BaseModel):
+    """File update request model."""
+    path: str
+    content: str
+
 
 class ChatChunk(BaseModel):
     """Streaming chat chunk."""
@@ -178,6 +187,8 @@ class ChatChunk(BaseModel):
     tool_output: str | None = None
     # When type=="permission_request", client must POST /permissions/{id}/reply before tool runs
     permission_request: dict | None = None
+    # For background UI metadata like the Edit Mode Todo list
+    progress: dict | None = None
 
 
 def _sse_chunk(chunk_type: str, content: str = "", **kwargs) -> str:
@@ -568,6 +579,19 @@ async def stream_agent_response_with_save(
                     # Handle text content
                     elif isinstance(message, AIMessage) and message.content:
                         content = str(message.content)
+                        msg_name = getattr(message, "name", "")
+                        
+                        # Background tracker messages should never be streamed as visible text
+                        if msg_name == "todo_tracker":
+                            _log.info(f"[Stream Node] Intercepted todo_tracker metadata ({len(content)} bytes)")
+                            try:
+                                progress_data = json.loads(content)
+                                chat_chunk = ChatChunk(type="progress", progress=progress_data)
+                                yield f"data: {chat_chunk.model_dump_json()}\n\n"
+                            except Exception as e:
+                                _log.error(f"Failed to parse tracker JSON: {e}")
+                            continue
+                            
                         _log.info(f"[AIMessage Content] node={node_name}, content_length={len(content)}, sent_so_far={sent_content_length}, first_100={content[:100]}")
                         
                         # If content is shorter than what we've already sent, this is a new message - reset tracking
@@ -734,6 +758,14 @@ async def root():
         "model": DEFAULT_MODEL,
         "provider": DEFAULT_PROVIDER,
     }
+
+@app.get("/testping")
+async def testping():
+    return {"ping": "pong"}
+
+@app.post("/testpatch")
+async def testpatch(request: dict):
+    return {"received": request}
 
 
 @app.post("/chat")
@@ -920,11 +952,14 @@ if SESSION_AVAILABLE:
             return dict(session)
 
     @app.patch("/sessions/{session_id}", summary="Update session")
-    async def update_session(session_id: str, title: str | None = None):
+    async def update_session(session_id: str, request: UpdateSessionRequest):
+        print(f"PATCH SESSION {session_id} - request: {request}", flush=True)
         session_svc = get_session()
         def editor(d):
-            if title is not None:
-                d["title"] = title
+            if request.title is not None:
+                d["title"] = request.title
+            if request.mode is not None:
+                d["mode"] = request.mode
         return session_svc.update(session_id, editor, touch=False)
 
     @app.delete("/sessions/{session_id}", summary="Delete session")
@@ -1088,10 +1123,41 @@ if SESSION_AVAILABLE:
         except HTTPException:
             raise
         except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+
+    @app.put("/sessions/{session_id}/workspace/file", summary="Update file in workspace")
+    async def update_workspace_file_api(session_id: str, request: FileUpdateRequest):
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            
+            if not workspace_root_path.exists():
+                raise HTTPException(status_code=404, detail="Workspace does not exist")
+                
+            # Sanitize and resolve the path
+            target_path = (workspace_root_path / request.path).resolve()
+            
+            # Ensure the path is within the workspace
+            if not str(target_path).startswith(str(workspace_root_path.resolve())):
+                raise HTTPException(status_code=403, detail="Path is outside workspace")
+                
+            # Create parent directories if they don't exist
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+                
+            try:
+                target_path.write_text(request.content, encoding="utf-8")
+                return {"message": "File updated successfully", "path": str(target_path.relative_to(workspace_root_path))}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to write file: {str(e)}")
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/sessions/{session_id}/children", summary="Get child sessions")
-    async def session_children(session_id: str):
+    @app.get("/sessions/{session_id}/children", summary="List child sessions")
+    async def list_session_children(session_id: str):
         session_svc = get_session()
         return [dict(s) for s in session_svc.children(session_id)]
 
