@@ -321,6 +321,7 @@ def get_default_workspace_permissions() -> list[dict]:
         {"permission": "list_components", "pattern": "*", "action": "allow"},
         {"permission": "list_services", "pattern": "*", "action": "allow"},
         {"permission": "generate_design_from_code", "pattern": "*", "action": "allow"},
+        {"permission": "generate_gap_analysis", "pattern": "*", "action": "allow"},
         
         # Require approval for shell commands (can modify system)
         {"permission": "bash", "pattern": "*", "action": "ask"},
@@ -1020,6 +1021,72 @@ if SESSION_AVAILABLE:
                 return {"message": "Sync complete. Metadata updated.", "metadata": metadata}
             finally:
                 clear_tool_context()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/sessions/{session_id}/workspace/tree", summary="Get workspace file tree")
+    async def get_workspace_tree_api(session_id: str):
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            
+            if not workspace_root_path.exists():
+                return {"name": "root", "type": "directory", "children": []}
+                
+            def build_tree(dir_path: Path):
+                tree = {"name": dir_path.name, "type": "directory", "children": []}
+                try:
+                    for item in sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                        # Ignore standard hidden dirs/files except .openscrum
+                        if item.name.startswith('.') and item.name != '.openscrum':
+                            continue
+                        if item.name in ('node_modules', '__pycache__', 'venv', '.venv', 'dist', 'build'):
+                            continue
+                            
+                        if item.is_dir():
+                            tree["children"].append(build_tree(item))
+                        else:
+                            try:
+                                rel_path = str(item.relative_to(workspace_root_path))
+                            except ValueError:
+                                rel_path = item.name
+                            tree["children"].append({"name": item.name, "type": "file", "path": rel_path})
+                except OSError:
+                    pass
+                return tree
+                
+            return build_tree(workspace_root_path)
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/sessions/{session_id}/workspace/file", summary="Get workspace file content")
+    async def get_workspace_file_api(session_id: str, path: str):
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            
+            # Resolve the requested path against the workspace root
+            # using resolve() and carefully checking if it's still inside root
+            requested_path = (workspace_root_path / path).resolve()
+            
+            # Prevent directory traversal attacks
+            if not str(requested_path).startswith(str(workspace_root_path.resolve())):
+                raise HTTPException(status_code=403, detail="Access denied")
+                
+            if not requested_path.exists() or not requested_path.is_file():
+                raise HTTPException(status_code=404, detail="File not found")
+                
+            with open(requested_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+            return {"content": content}
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

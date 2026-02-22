@@ -41,7 +41,7 @@ from ..tools.system_tools import (
     task, websearch, codesearch, batch, lsp,
     design_create, design_read, design_write, design_list, design_update_section,
     plan_exit, plan_enter,
-    scan_codebase, extract_api_routes, extract_db_schemas, list_components, list_services, generate_design_from_code,
+    scan_codebase, extract_api_routes, extract_db_schemas, list_components, list_services, generate_design_from_code, generate_gap_analysis,
     __all__ as TOOL_NAMES,
 )
 
@@ -146,6 +146,7 @@ def get_plan_mode_tools(workspace_root: str = None):
         list_components,
         list_services,
         generate_design_from_code,
+        generate_gap_analysis,
         # Mode navigation
         plan_exit,
         plan_enter,

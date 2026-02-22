@@ -64,7 +64,7 @@
 <script setup>
 import { defineProps } from 'vue'
 
-const props = defineProps({
+defineProps({
   tool: {
     type: Object,
     default: null

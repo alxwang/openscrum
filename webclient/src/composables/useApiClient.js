@@ -128,7 +128,7 @@ export function useApiClient() {
     } else {
       endpoint = '/chat'
       // For stateless mode, use current directory as workspace
-      requestData.workspace_root = window.location.pathname || process.cwd()
+      requestData.workspace_root = window.location.pathname || ''
     }
 
     try {
@@ -150,6 +150,7 @@ export function useApiClient() {
       const decoder = new TextDecoder()
       let buffer = ''
 
+      // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
@@ -289,6 +290,32 @@ export function useApiClient() {
     }
   }
 
+  const fetchWorkspaceTree = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}/workspace/tree`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to get workspace tree:', error)
+      return {
+        name: "root",
+        type: "directory",
+        children: []
+      }
+    }
+  }
+
+  const fetchWorkspaceFile = async (id, path) => {
+    try {
+      const response = await client.get(`/sessions/${id}/workspace/file`, {
+        params: { path }
+      })
+      return response.data.content
+    } catch (error) {
+      console.error('Failed to get workspace file:', error)
+      throw error
+    }
+  }
+
   return {
     health,
     listSessions,
@@ -306,6 +333,8 @@ export function useApiClient() {
     analyzeWorkspace,
     fetchSyncStatus,
     triggerWorkspaceSync,
+    fetchWorkspaceTree,
+    fetchWorkspaceFile,
     sessionId,
     modelName,
   }

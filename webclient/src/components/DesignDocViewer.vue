@@ -1,12 +1,20 @@
 <template>
-  <div class="design-doc-viewer h-full flex flex-col bg-surface/30">
+  <div class="design-doc-viewer h-full flex flex-col bg-surface-dark">
     <!-- Header with edit controls -->
-    <div class="px-4 py-3 border-b border-surface-dark flex items-center justify-between">
+    <div class="px-4 py-3 border-b border-surface flex items-center justify-between bg-surface">
       <div>
         <h3 class="text-sm font-semibold text-text-inverse">{{ docInfo?.name || 'Select a document' }}</h3>
         <p v-if="docInfo" class="text-xs text-text-muted mt-0.5">{{ docInfo.description }}</p>
       </div>
       <div v-if="hasContent" class="flex items-center gap-2">
+        <button
+          v-if="!isEditing"
+          @click="$emit('sync', docType)"
+          class="px-3 py-1.5 text-xs rounded-lg bg-surface-dark hover:bg-surface transition-colors"
+          title="Update this document from the codebase"
+        >
+          Sync
+        </button>
         <button
           v-if="!isEditing"
           @click="startEditing"
@@ -46,17 +54,17 @@
       <div v-else-if="isEditing" class="h-full flex flex-col">
         <textarea
           v-model="editContent"
-          class="flex-1 w-full px-4 py-3 bg-white text-gray-900 font-mono text-sm resize-none focus:outline-none border border-gray-200"
+          class="flex-1 w-full px-4 py-3 bg-background-darker text-text-inverse font-mono text-sm resize-none focus:outline-none border border-surface-dark whitespace-pre-wrap break-words"
           style="font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;"
         ></textarea>
-        <div class="px-4 py-2 bg-gray-50 border-t border-gray-200 text-xs text-gray-600">
+        <div class="px-4 py-2 bg-surface-dark border-t border-surface-dark text-xs text-text-muted">
           Markdown format • Changes auto-save
         </div>
       </div>
       
       <!-- View mode (rendered markdown) -->
-      <div v-else class="h-full overflow-y-auto custom-scrollbar px-6 py-4 bg-white">
-        <div class="prose max-w-none" v-html="renderedContent"></div>
+      <div v-else class="h-full overflow-y-auto custom-scrollbar px-6 py-4 bg-background-darker">
+        <div class="prose max-w-none whitespace-pre-wrap break-words" v-html="renderedContent"></div>
       </div>
     </div>
   </div>
@@ -66,7 +74,7 @@
 import { ref, computed, watch } from 'vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
-import 'highlight.js/styles/github.css'
+import 'highlight.js/styles/github-dark.css'
 
 // Configure marked for code highlighting
 marked.setOptions({
@@ -99,7 +107,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['save'])
+const emit = defineEmits(['save', 'sync'])
 
 const isEditing = ref(false)
 const editContent = ref('')
@@ -178,7 +186,7 @@ const saveChanges = () => {
 
 /* Prose styling for rendered markdown */
 :deep(.prose) {
-  color: #1a202c;
+  color: #e2e8f0;
 }
 
 :deep(.prose h1),
@@ -187,7 +195,7 @@ const saveChanges = () => {
 :deep(.prose h4),
 :deep(.prose h5),
 :deep(.prose h6) {
-  color: #000000;
+  color: #ffffff;
   font-weight: 600;
 }
 
@@ -202,7 +210,7 @@ const saveChanges = () => {
   margin-top: 2rem;
   margin-bottom: 0.75rem;
   padding-bottom: 0.5rem;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid #4a5568;
 }
 
 :deep(.prose h3) {
@@ -230,47 +238,51 @@ const saveChanges = () => {
 }
 
 :deep(.prose code) {
-  background-color: #f7fafc;
+  background-color: #1a202c;
   padding: 0.125rem 0.25rem;
   border-radius: 0.25rem;
   font-size: 0.875rem;
-  color: #c53030;
-  border: 1px solid #e2e8f0;
+  color: #fc8181;
+  border: 1px solid #2d3748;
 }
 
 :deep(.prose pre) {
-  background-color: #f7fafc;
+  background-color: #1a202c;
   padding: 1rem;
   border-radius: 0.5rem;
-  overflow-x: auto;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  white-space: pre-wrap;
   margin-top: 1rem;
   margin-bottom: 1rem;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #2d3748;
 }
 
 :deep(.prose pre code) {
   background-color: transparent;
   padding: 0;
-  color: #1a202c;
+  color: #e2e8f0;
   font-size: 0.875rem;
   border: none;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 :deep(.prose a) {
-  color: #2563eb;
+  color: #63b3ed;
   text-decoration: underline;
 }
 
 :deep(.prose a:hover) {
-  color: #1d4ed8;
+  color: #90cdf4;
 }
 
 :deep(.prose blockquote) {
-  border-left: 4px solid #cbd5e0;
+  border-left: 4px solid #4a5568;
   padding-left: 1rem;
   margin-left: 0;
   font-style: italic;
-  color: #4a5568;
+  color: #a0aec0;
 }
 
 :deep(.prose table) {
@@ -281,21 +293,21 @@ const saveChanges = () => {
 }
 
 :deep(.prose th) {
-  background-color: #f7fafc;
+  background-color: #1a202c;
   padding: 0.5rem;
   text-align: left;
   font-weight: 600;
-  border: 1px solid #e2e8f0;
-  color: #000000;
+  border: 1px solid #2d3748;
+  color: #ffffff;
 }
 
 :deep(.prose td) {
   padding: 0.5rem;
-  border: 1px solid #e2e8f0;
-  color: #1a202c;
+  border: 1px solid #2d3748;
+  color: #e2e8f0;
 }
 
 :deep(.prose tr:nth-child(even)) {
-  background-color: #f7fafc;
+  background-color: #1a202c;
 }
 </style>

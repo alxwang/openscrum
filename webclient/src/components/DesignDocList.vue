@@ -14,20 +14,20 @@
           :key="docType"
           @click="$emit('select', docType)"
           :class="[
-            'w-full text-left px-3 py-2 rounded-lg transition-colors',
+            'w-full text-left px-3 py-2 rounded-lg transition-colors group',
             selectedDoc === docType 
               ? 'bg-accent text-text-inverse' 
-              : 'bg-surface-dark hover:bg-surface text-text'
+              : 'bg-surface-dark hover:bg-surface text-text hover:text-surface-dark'
           ]"
         >
           <div class="flex items-center gap-2">
-            <span :class="doc.exists ? 'text-green-400' : 'text-text-muted'">
+            <span :class="doc.exists ? (selectedDoc === docType ? 'text-green-300' : 'text-green-500') : 'text-text-muted group-hover:text-surface-dark/60'">
               {{ doc.exists ? '✓' : '○' }}
             </span>
             <div class="flex-1 min-w-0">
-              <div class="font-medium text-sm">{{ doc.name }}</div>
-              <div class="text-xs text-text-muted truncate">{{ doc.description }}</div>
-              <div v-if="doc.exists && doc.last_modified" class="text-xs text-text-muted mt-0.5">
+              <div class="font-medium text-sm transition-colors" :class="selectedDoc === docType ? 'text-text-inverse' : 'group-hover:text-surface-dark'">{{ doc.name }}</div>
+              <div class="text-xs truncate transition-colors" :class="selectedDoc === docType ? 'text-text-inverse/80' : 'text-text-muted group-hover:text-surface-dark/80'">{{ doc.description }}</div>
+              <div v-if="doc.exists && doc.last_modified" class="text-xs mt-0.5 transition-colors" :class="selectedDoc === docType ? 'text-text-inverse/60' : 'text-text-muted group-hover:text-surface-dark/60'">
                 Modified: {{ formatDate(doc.last_modified) }}
               </div>
             </div>

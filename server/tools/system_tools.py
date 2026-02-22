@@ -1468,7 +1468,7 @@ def analyze_workspace() -> str:
     has_design_docs = len(existing_docs) > 0
 
     # 2. Check for code files
-    code_extensions = {'.py', '.ts', '.js', '.vue', '.jsx', '.tsx', '.go', '.java', '.rb', '.php', '.cs', '.rs', '.c', '.cpp', '.h', '.hpp'}
+    code_extensions = {'.py', '.ts', '.js', '.vue', '.jsx', '.tsx', '.go', '.java', '.rb', '.php', '.cs', '.rs', '.c', '.cpp', '.h', '.hpp', '.prisma', '.sql', '.graphql'}
     ignore_dirs = {'.git', 'node_modules', '__pycache__', 'venv', '.venv', 'env', '.openscrum', 'dist', 'build', 'target', 'vendor', '.idea', '.vscode', 'public', 'assets'}
     
     code_file_count = 0
@@ -1805,6 +1805,47 @@ def generate_design_from_code(doc_type: str) -> str:
     # The actual LLM agent will receive this string and use it to formulate the final design.
     return f"Codebase Context for {doc_type}:\n\n{context}\n\nINSTRUCTION: Please use the above extracted information from the codebase to write a comprehensive '{doc_type}.md' design document. CRITICAL: You MUST strictly reflect ONLY the current state of the code. NO MORE NO LESS. Do NOT add missing features or omit existing ones. Call the 'design_write' tool with your generated markdown."
 
+@tool
+def generate_gap_analysis() -> str:
+    """
+    Compares the current codebase against existing design documents to generate a Gap Analysis report.
+    This helps the user understand exactly where the code and design have drifted out of sync.
+    """
+    context = ""
+    context += "\n--- Current Codebase Scans ---\n"
+    context += "\nAPI Routes:\n" + extract_api_routes()
+    context += "\nDatabase Schemas:\n" + extract_db_schemas()
+    context += "\nComponents:\n" + list_components()
+    context += "\nServices:\n" + list_services()
+    
+    workspace_root = get_workspace_root()
+    if workspace_root:
+        design_dir = Path(workspace_root) / ".openscrum" / "design"
+        context += "\n\n--- Existing Design Documents ---\n"
+        
+        for doc_type in ['api_design', 'architecture', 'database_design', 'functionalities', 'tech_stack', 'user_flow', 'requirements']:
+            doc_path = design_dir / f"{doc_type}.md"
+            if doc_path.exists():
+                try:
+                    with open(doc_path, 'r', encoding='utf-8') as f:
+                        contents = f.read()
+                        # Shorten if too long, we just need the structural gist
+                        if len(contents) > 3000:
+                            contents = contents[:3000] + "... (truncated)"
+                        context += f"\nDocument: {doc_type}.md\nContent:\n{contents}\n"
+                except Exception as e:
+                    context += f"\nError reading {doc_type}.md: {str(e)}\n"
+                    
+    instruction = (
+        "INSTRUCTION: Below is the current programmatic state of the codebase, followed by the contents of the existing design documents. "
+        "Please compare them and write a highly detailed 'Gap Analysis' report. "
+        "Highlight exactly what features, routes, schemas or components exist in the code but are missing from the design docs (or vice versa). "
+        "Format your response as a comprehensive markdown report. "
+        "Call the 'design_write' tool with doc_type='gap_analysis' to save this report."
+    )
+    
+    return f"{instruction}\n\n{context}"
+
 
 # ============================================================================
 # Sync Tracking Tools
@@ -1952,4 +1993,6 @@ __all__ = [
     'list_components',
     'list_services',
     'generate_design_from_code',
+    'generate_gap_analysis',
 ]
+

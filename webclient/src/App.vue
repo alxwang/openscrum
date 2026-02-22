@@ -206,18 +206,42 @@
             class="mx-4 mt-4"
           />
 
-          <!-- Plan Mode: Design Document List -->
-          <div v-if="mode === 'plan'" class="h-full">
-            <DesignDocList
-              v-if="hasAnyDesignDocs"
-              :documents="designDocuments"
-              :selectedDoc="selectedDesignDoc"
-              @select="handleSelectDesignDoc"
-            />
-            <div v-else class="flex flex-col items-center justify-center h-full text-text-muted px-4 p-8 text-center space-y-4">
-              <div class="text-4xl text-surface-dark mt-4">📋</div>
-              <h3 class="text-sm font-medium text-text-inverse">Getting Started</h3>
-              <p class="text-xs">Ask the agent to design your app. It will analyze your workspace and create the architecture documents here.</p>
+          <!-- Plan Mode: Design Document List & File Tree -->
+          <div v-if="mode === 'plan'" class="h-full flex flex-col">
+            <!-- Top Half: Design Docs -->
+            <div class="flex-1 overflow-hidden" :style="{ maxHeight: '50%' }">
+              <DesignDocList
+                v-if="hasAnyDesignDocs"
+                :documents="designDocuments"
+                :selectedDoc="selectedDesignDoc"
+                @select="handleSelectDesignDoc"
+              />
+              <div v-else class="flex flex-col items-center justify-center h-full text-text-muted px-4 p-8 text-center space-y-4">
+                <div class="text-4xl text-surface-dark mt-4">📋</div>
+                <h3 class="text-sm font-medium text-text-inverse">Getting Started</h3>
+                <p class="text-xs">Ask the agent to design your app. It will analyze your workspace and create the architecture documents here.</p>
+              </div>
+            </div>
+
+            <!-- Horizontal Divider -->
+            <div class="h-1 bg-surface-dark flex-shrink-0"></div>
+
+            <!-- Bottom Half: Codebase Tree -->
+            <div class="flex-1 overflow-hidden flex flex-col" :style="{ maxHeight: '50%' }">
+              <div class="px-4 py-3 border-b border-surface-dark bg-surface/50">
+                <h3 class="text-sm font-semibold text-text-inverse">Codebase</h3>
+                <p class="text-xs text-text-muted mt-1">Files in your workspace</p>
+              </div>
+              <div class="flex-1 overflow-hidden bg-white p-2">
+                <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm">
+                  <FileTree 
+                    :sessionId="sessionId" 
+                    :refreshTrigger="syncRefreshCounter" 
+                    :selectedFile="selectedCodeFile"
+                    @select-file="handleSelectCodeFile"
+                  />
+                </div>
+              </div>
             </div>
           </div>
           
@@ -248,17 +272,33 @@
 
         <!-- Right Pane - Tools or Design Doc Viewer (30%) -->
         <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth - centerPaneWidth) + '%' }">
-          <!-- Plan Mode: Design Document Viewer -->
-          <div v-if="mode === 'plan'" class="h-full">
-            <DesignDocViewer
-              v-if="hasAnyDesignDocs"
-              :docType="selectedDesignDoc"
-              :docInfo="designDocInfo"
-              :content="selectedDesignDocContent"
-              @save="handleSaveDesignDoc"
-            />
-            <div v-else class="flex flex-col items-center justify-center h-full bg-surface-dark border-b border-surface">
-              <!-- Empty Right Pane -->
+          <!-- Plan Mode: Design Document Viewer OR Code Viewer -->
+          <div v-if="mode === 'plan'" class="h-full bg-white p-2">
+            <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
+              <!-- Code File Viewer -->
+              <template v-if="selectedCodeFile">
+                <CodeViewer
+                  :path="selectedCodeFile"
+                  :content="selectedCodeFileContent"
+                  :loading="isCodeFileLoading"
+                  :error="codeFileError"
+                  @close="handleCloseCodeFile"
+                />
+              </template>
+              <!-- Design Document Viewer -->
+              <template v-else>
+                <DesignDocViewer
+                  v-if="hasAnyDesignDocs"
+                  :docType="selectedDesignDoc"
+                  :docInfo="designDocInfo"
+                  :content="selectedDesignDocContent"
+                  @save="handleSaveDesignDoc"
+                  @sync="handleSyncSingleDoc"
+                />
+                <div v-else class="flex flex-col items-center justify-center h-full bg-surface-dark border-b border-surface">
+                  <!-- Empty Right Pane -->
+                </div>
+              </template>
             </div>
           </div>
           
@@ -328,15 +368,15 @@ import ToolOutput from './components/ToolOutput.vue'
 import DesignDocList from './components/DesignDocList.vue'
 import DesignDocViewer from './components/DesignDocViewer.vue'
 import SyncWarningBanner from './components/SyncWarningBanner.vue'
+import FileTree from './components/FileTree.vue'
+import CodeViewer from './components/CodeViewer.vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
 const { 
   health, 
-  listSessions,
   getSession,
   getSessionMessages,
-  createSession, 
   setSession,
   clearSession,
   sendMessage: apiSendMessage,
@@ -347,7 +387,7 @@ const {
   getTokenUsage,
   analyzeWorkspace,
   fetchSyncStatus,
-  triggerWorkspaceSync,
+  fetchWorkspaceFile,
   sessionId,
   modelName 
 } = useApiClient()
@@ -388,7 +428,6 @@ const showSessionSelector = ref(false)
 const currentSession = ref(null)
 const workspaceStatus = ref(null)
 const syncStatus = ref(null)
-const isSyncing = ref(false)
 const isInitializing = ref(true)
 const pendingPermission = ref(null)
 const permissionResolve = ref(null)
@@ -399,6 +438,12 @@ const designDocuments = ref({})
 const selectedDesignDoc = ref(null)
 const selectedDesignDocContent = ref(null)
 const designDocInfo = ref({ name: '', description: '' })
+
+// Code viewer state
+const selectedCodeFile = ref(null)
+const selectedCodeFileContent = ref('')
+const isCodeFileLoading = ref(false)
+const codeFileError = ref(null)
 
 // Computed property to check if any design docs actually exist
 const hasAnyDesignDocs = computed(() => {
@@ -527,6 +572,8 @@ const clearSessionState = () => {
     currentToolCommand.value = null
     pendingQuestionData.value = null
     latestProgress.value = null
+    selectedCodeFile.value = null
+    selectedCodeFileContent.value = ''
     console.log('[State] Cleared session state')
   } catch (error) {
     console.error('[State] Failed to clear state:', error)
@@ -1383,7 +1430,7 @@ const handleResetSession = async () => {
     pendingQuestionData.value = null
     latestProgress.value = null
     designDocuments.value = []
-    selectedDocument.value = null
+    selectedDesignDoc.value = null
     
     // Clear session state
     clearSessionState()
@@ -1518,6 +1565,7 @@ const fetchDesignDocuments = async () => {
 const handleSelectDesignDoc = async (docType) => {
   console.log('[Design] Selected document:', docType)
   selectedDesignDoc.value = docType
+  selectedCodeFile.value = null // hide code viewer
   
   // Fetch document content
   try {
@@ -1540,6 +1588,38 @@ const handleSelectDesignDoc = async (docType) => {
     }
   } catch (error) {
     console.error('[Design] Failed to fetch document content:', error)
+  }
+}
+
+const handleSelectCodeFile = async (path) => {
+  console.log('[Code] Selected code file:', path)
+  selectedDesignDoc.value = null // hide design doc viewer
+  selectedCodeFile.value = path
+  isCodeFileLoading.value = true
+  codeFileError.value = null
+  selectedCodeFileContent.value = ''
+  
+  try {
+    const content = await fetchWorkspaceFile(sessionId.value, path)
+    selectedCodeFileContent.value = content
+  } catch (error) {
+    console.error('[Code] Failed to fetch code file:', error)
+    codeFileError.value = 'Failed to load code file content.'
+  } finally {
+    isCodeFileLoading.value = false
+  }
+}
+
+const handleCloseCodeFile = () => {
+  selectedCodeFile.value = null
+  selectedCodeFileContent.value = ''
+  
+  // optionally re-select the first available design doc:
+  if (hasAnyDesignDocs.value) {
+    const firstDoc = Object.keys(designDocuments.value).find(k => designDocuments.value[k].exists)
+    if (firstDoc) {
+      handleSelectDesignDoc(firstDoc)
+    }
   }
 }
 
@@ -1838,6 +1918,13 @@ const handleSyncWorkspace = async () => {
   // We trigger the agent to perform the actual reverse engineering
   // by sending an explicit instruction on the user's behalf.
   inputMessage.value = "The codebase is out of sync with the design documents. Please review the codebase and rewrite all design documents to accurately reflect the current code. Use your scanning tools."
+  await sendMessage()
+}
+
+const handleSyncSingleDoc = async (docType) => {
+  if (!sessionId.value || isSending.value) return
+  
+  inputMessage.value = `The codebase might be out of sync. Please review the codebase and rewrite the '${docType}.md' design document to accurately reflect the current code. Use your scanning tools.`
   await sendMessage()
 }
 

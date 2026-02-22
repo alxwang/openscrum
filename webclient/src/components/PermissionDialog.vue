@@ -118,7 +118,7 @@
 </template>
 
 <script setup>
-const props = defineProps({
+defineProps({
   permission: {
     type: Object,
     required: true,

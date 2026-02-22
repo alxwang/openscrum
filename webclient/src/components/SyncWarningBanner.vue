@@ -32,7 +32,7 @@
 <script setup>
 import { ref } from 'vue'
 
-const props = defineProps({
+defineProps({
   warnings: {
     type: Array,
     default: () => []

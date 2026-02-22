@@ -297,6 +297,22 @@ METHOD /path/:param
 - How success will be measured
 - KPIs to track
 """
+    },
+    "gap_analysis": {
+        "name": "Gap Analysis",
+        "filename": "gap_analysis.md",
+        "description": "Analysis of drift between codebase and design documents",
+        "template": """# Gap Analysis
+
+## Overview
+This document highlights the discrepancies between the current programmatic state of the codebase and the expected architecture defined in the design documents.
+
+## Identified Discrepancies
+- [Code feature X] exists but is not in the [Y] design document.
+
+## Resolution Plan
+- Action items
+"""
     }
 }
 

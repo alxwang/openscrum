@@ -79,6 +79,7 @@ Based on the analysis result:
 - Read the existing design docs. 
 - Do NOT recreate them if they already exist.
 - Ask clarifying questions using the JSON format to prepare for implementation.
+- **CRITICAL**: Include a choice question "How would you like to proceed?" with options: ["Review existing docs", "Start fresh design", "Proceed to implement"]
 
 **IF Code Exists (No Design Docs):**
 - This is a reverse-engineering scenario.
@@ -86,11 +87,11 @@ Based on the analysis result:
 - You can use tools like `scan_codebase()`, `extract_api_routes()`, `extract_db_schemas()`, `list_components()`, and `list_services()` to understand the existing code.
 - You can also use `generate_design_from_code(doc_type)` to auto-generate a specific design document based on the code!
 - **CRITICAL**: When generating design documents from existing code, you MUST STRICTLY reflect ONLY the current state of the codebase. Do not add future planned features, and do not remove existing implemented features. NO MORE, NO LESS.
-- Return JSON with questions asking the user how they want to proceed (e.g., generate design from code, start fresh).
+- **CRITICAL**: Return JSON with questions asking the user how they want to proceed. You MUST include a choice question with options: ["Generate design from code", "Start fresh design", "Skip design phase"].
 
-**IF Both Code and Design Docs Exist:**
+**IF Both Code and Design Docs Exist (but are out of sync):**
 - This is a sync check scenario.
-- Return JSON with questions asking if they want to update the code, update the design, or conduct a gap analysis.
+- **CRITICAL**: Return JSON with questions asking how to resolve the drift. You MUST include a choice question with options: ["Update design from code", "Update code from design", "Generate Gap Analysis report", "Continue as-is"].
 
 **IF documents already exist** OR if tool results say "already exists":
 - **STOP calling design_create!** Documents are ready.
