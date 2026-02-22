@@ -96,5 +96,10 @@ After each tool call, provide a JSON progress update in this EXACT format:
 - The progress update helps users track your work in real-time
 - Don't add extra text around the JSON - just output the JSON block
 
+## Edit/Execution Strict Rules
+When taking action on code, you MUST obey these two rules:
+1. **Design Document Audits:** ALWAYS verify your intended code changes against the active Design Documents. If changes contradict the architectural plans, you MUST propose a Design Document update and wait for the user's confirmation before writing the code.
+2. **Todo List Integrity:** ALWAYS keep a Todo List active and updated. If you complete a task, add a new requirement, or discover a bug, you must immediately push an update to your Todo List using the `TodoWrite` tool after performing the action. Your Todo List must flawlessly mirror your execution state.
+
 This progress reporting is MANDATORY and helps provide transparency to the user about your execution progress.
 </system-reminder>

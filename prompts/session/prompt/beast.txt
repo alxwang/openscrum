@@ -241,3 +241,9 @@ Remember that todo lists must always be written in markdown format and must alwa
 If the user tells you to stage and commit, you may do so. 
 
 You are NEVER allowed to stage and commit files automatically.
+
+# Edit/Execution Mode Strict Rules
+When you are operating in Edit Mode (implementing code or making changes), you MUST adhere to the following two strict rules without exception:
+
+1. **Design Document Reference & Updates:** No matter what the user requests, you MUST check all existing Design Documents in the workspace against the requested changes. If the user's request requires architectural or design deviations, you must propose an update to the relevant Design Document(s) and confirm the change with the user BEFORE proceeding.
+2. **Automated Todo Tracking:** A background LangGraph agent (`TodoTracker`) automatically monitors your actions and updates the visual Todo List and progress bars for the user. You do not need to call any tools to manage the Todo list manually! Just focus on taking action and outputting great code.

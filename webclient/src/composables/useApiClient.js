@@ -316,6 +316,36 @@ export function useApiClient() {
     }
   }
 
+  const fetchTodos = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}/todo`)
+      return response.data || []
+    } catch (error) {
+      console.error('Failed to fetch todos:', error)
+      return []
+    }
+  }
+
+  const updateTodos = async (id, todos) => {
+    try {
+      const response = await client.put(`/sessions/${id}/todo`, todos)
+      return response.data || []
+    } catch (error) {
+      console.error('Failed to update todos:', error)
+      return todos // Return old on failure?
+    }
+  }
+
+  const generateTodos = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/todo/generate`)
+      return response.data || []
+    } catch (error) {
+      console.error('Failed to generate todos:', error)
+      return []
+    }
+  }
+
   return {
     health,
     listSessions,
@@ -335,6 +365,9 @@ export function useApiClient() {
     triggerWorkspaceSync,
     fetchWorkspaceTree,
     fetchWorkspaceFile,
+    fetchTodos,
+    updateTodos,
+    generateTodos,
     sessionId,
     modelName,
   }

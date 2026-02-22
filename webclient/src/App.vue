@@ -206,21 +206,33 @@
             class="mx-4 mt-4"
           />
 
-          <!-- Plan Mode: Design Document List & File Tree -->
-          <div v-if="mode === 'plan'" class="h-full flex flex-col">
-            <!-- Top Half: Design Docs -->
+          <!-- Center Pane: Split View (List Top, Codebase Bottom) -->
+          <div v-if="mode === 'plan' || mode === 'edit'" class="h-full flex flex-col">
+            <!-- Top Half: Design Docs OR Todo List -->
             <div class="flex-1 overflow-hidden" :style="{ maxHeight: '50%' }">
-              <DesignDocList
-                v-if="hasAnyDesignDocs"
-                :documents="designDocuments"
-                :selectedDoc="selectedDesignDoc"
-                @select="handleSelectDesignDoc"
-              />
-              <div v-else class="flex flex-col items-center justify-center h-full text-text-muted px-4 p-8 text-center space-y-4">
-                <div class="text-4xl text-surface-dark mt-4">📋</div>
-                <h3 class="text-sm font-medium text-text-inverse">Getting Started</h3>
-                <p class="text-xs">Ask the agent to design your app. It will analyze your workspace and create the architecture documents here.</p>
-              </div>
+              <template v-if="mode === 'plan'">
+                <DesignDocList
+                  v-if="hasAnyDesignDocs"
+                  :documents="designDocuments"
+                  :selectedDoc="selectedDesignDoc"
+                  @select="handleSelectDesignDoc"
+                />
+                <div v-else class="flex flex-col items-center justify-center h-full text-text-muted px-4 p-8 text-center space-y-4">
+                  <div class="text-4xl text-surface-dark mt-4">📋</div>
+                  <h3 class="text-sm font-medium text-text-inverse">Getting Started</h3>
+                  <p class="text-xs">Ask the agent to design your app. It will analyze your workspace and create the architecture documents here.</p>
+                </div>
+              </template>
+              <template v-else-if="mode === 'edit'">
+                <TodoList 
+                  :todos="todos"
+                  :currentProgress="latestProgress?.current_progress || {}"
+                  :isGenerating="isGeneratingTodos"
+                  @generate="handleGenerateTodos"
+                  @delete="handleDeleteTodo"
+                  @process="handleProcessTodo"
+                />
+              </template>
             </div>
 
             <!-- Horizontal Divider -->
@@ -244,23 +256,6 @@
               </div>
             </div>
           </div>
-          
-          <!-- Edit Mode: Progress Tracker -->
-          <div v-else-if="latestProgress && mode === 'edit'" class="p-4 overflow-y-auto custom-scrollbar">
-            <ProgressTracker 
-              :plan="latestProgress.plan"
-              :currentProgress="latestProgress.current_progress"
-            />
-          </div>
-          
-          <!-- Empty State / Mode Info -->
-          <div v-else class="flex items-center justify-center h-full text-text-muted px-4">
-            <div class="text-center">
-              <p class="text-sm">
-                Progress will appear here during execution
-              </p>
-            </div>
-          </div>
         </div>
 
         <!-- Right Draggable Divider (between center and right) -->
@@ -270,9 +265,10 @@
           :class="{ 'bg-accent': isDraggingRight }"
         ></div>
 
-        <!-- Right Pane - Tools or Design Doc Viewer (30%) -->
+        <!-- Right Pane: Document/Console & Code Viewers -->
         <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth - centerPaneWidth) + '%' }">
-          <!-- Plan Mode: Design Document Viewer OR Code Viewer -->
+          
+          <!-- Plan Mode: Full Size Code Viewer OR Design Document Viewer -->
           <div v-if="mode === 'plan'" class="h-full bg-white p-2">
             <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
               <!-- Code File Viewer -->
@@ -295,34 +291,54 @@
                   @save="handleSaveDesignDoc"
                   @sync="handleSyncSingleDoc"
                 />
-                <div v-else class="flex flex-col items-center justify-center h-full bg-surface-dark border-b border-surface">
+                <div v-else class="flex flex-col items-center justify-center h-full bg-surface-dark">
                   <!-- Empty Right Pane -->
                 </div>
               </template>
             </div>
           </div>
           
-          <!-- Edit Mode: Tool List and Output (Split view) -->
-          <template v-else>
-            <!-- Top Section - Tool List -->
-            <div class="bg-surface/30 border-b border-surface-dark overflow-auto" :style="{ height: rightTopHeight + '%' }">
-              <ToolList 
-                :tools="toolExecutions" 
-                :selectedTool="selectedTool"
-                @select="handleSelectTool"
-              />
+          <!-- Edit Mode: Split Pane (Console Top, Code Viewer Bottom) -->
+          <template v-else-if="mode === 'edit'">
+            <!-- Top Section - Console Viewer -->
+            <div class="bg-surface-dark overflow-hidden flex flex-col" :style="{ height: rightTopHeight + '%' }">
+              <div class="h-full bg-white p-2 pb-1">
+                <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
+                  <ConsoleViewer ref="consoleViewerRef" :output="consoleOutput" />
+                </div>
+              </div>
             </div>
             
-            <!-- Vertical Draggable Divider -->
+            <!-- Horizontal Draggable Divider -->
             <div 
               @mousedown="startDraggingVertical"
               class="h-1 bg-surface-dark hover:bg-accent cursor-row-resize transition-colors flex-shrink-0"
               :class="{ 'bg-accent': isDraggingVertical }"
             ></div>
             
-            <!-- Bottom Section - Tool Output -->
-            <div class="flex-1 overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
-              <ToolOutput :tool="selectedTool" />
+            <!-- Bottom Section - Code Viewer -->
+            <div class="bg-surface-dark flex-1 overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
+              <div class="h-full bg-white p-2 pt-1">
+                <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
+                  <template v-if="selectedCodeFile">
+                    <CodeViewer
+                      :path="selectedCodeFile"
+                      :content="selectedCodeFileContent"
+                      :loading="isCodeFileLoading"
+                      :error="codeFileError"
+                      @close="handleCloseCodeFile"
+                    />
+                  </template>
+                  <div v-else class="flex flex-col items-center justify-center h-full text-text-muted bg-surface/50">
+                    <div class="w-12 h-12 rounded-full bg-surface-dark/50 flex items-center justify-center mb-3">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                      </svg>
+                    </div>
+                    <p class="text-sm">Select a file from the tree to view its contents</p>
+                  </div>
+                </div>
+              </div>
             </div>
           </template>
         </div>
@@ -361,15 +377,14 @@ import { useApiClient } from './composables/useApiClient'
 import SessionSelector from './components/SessionSelector.vue'
 import PermissionDialog from './components/PermissionDialog.vue'
 import QuestionDialog from './components/QuestionDialog.vue'
-import ProgressTracker from './components/ProgressTracker.vue'
 import TokenUsageIndicator from './components/TokenUsageIndicator.vue'
-import ToolList from './components/ToolList.vue'
-import ToolOutput from './components/ToolOutput.vue'
 import DesignDocList from './components/DesignDocList.vue'
 import DesignDocViewer from './components/DesignDocViewer.vue'
 import SyncWarningBanner from './components/SyncWarningBanner.vue'
 import FileTree from './components/FileTree.vue'
 import CodeViewer from './components/CodeViewer.vue'
+import TodoList from './components/TodoList.vue'
+import ConsoleViewer from './components/ConsoleViewer.vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
@@ -388,6 +403,9 @@ const {
   analyzeWorkspace,
   fetchSyncStatus,
   fetchWorkspaceFile,
+  fetchTodos,
+  updateTodos,
+  generateTodos,
   sessionId,
   modelName 
 } = useApiClient()
@@ -439,11 +457,14 @@ const selectedDesignDoc = ref(null)
 const selectedDesignDocContent = ref(null)
 const designDocInfo = ref({ name: '', description: '' })
 
-// Code viewer state
 const selectedCodeFile = ref(null)
 const selectedCodeFileContent = ref('')
 const isCodeFileLoading = ref(false)
 const codeFileError = ref(null)
+
+// Edit mode state
+const consoleOutput = ref('')
+const consoleViewerRef = ref(null)
 
 // Computed property to check if any design docs actually exist
 const hasAnyDesignDocs = computed(() => {
@@ -457,6 +478,10 @@ const sessionState = ref('idle')
 
 // Latest progress/plan data (displayed in center pane)
 const latestProgress = ref(null)
+
+// Todos array for interactive execution plan
+const todos = ref([])
+const isGeneratingTodos = ref(false)
 
 // Resizable panes state (3-pane layout)
 const leftPaneWidth = ref(40) // Left pane (chat) - 40%
@@ -502,6 +527,7 @@ const saveSessionState = () => {
     currentTool: currentTool.value,
     currentToolCommand: currentToolCommand.value,
     pendingQuestionData: pendingQuestionData.value,
+    pendingPermission: pendingPermission.value,
     timestamp: Date.now()
   }
   
@@ -541,6 +567,7 @@ const restoreSessionState = () => {
         currentTool.value = state.currentTool || null
         currentToolCommand.value = state.currentToolCommand || null
         pendingQuestionData.value = state.pendingQuestionData || null
+        pendingPermission.value = state.pendingPermission || null
         console.log('[State] Restored session state')
         console.log('[State] pendingQuestionData restored?', !!pendingQuestionData.value)
         if (pendingQuestionData.value) {
@@ -571,7 +598,9 @@ const clearSessionState = () => {
     currentTool.value = null
     currentToolCommand.value = null
     pendingQuestionData.value = null
+    pendingPermission.value = null
     latestProgress.value = null
+    todos.value = []
     selectedCodeFile.value = null
     selectedCodeFileContent.value = ''
     console.log('[State] Cleared session state')
@@ -1216,7 +1245,12 @@ const handleQuestionSkip = () => {
 }
 
 const toggleMode = () => {
-  mode.value = mode.value === 'plan' ? 'edit' : 'plan'
+  const newMode = mode.value === 'plan' ? 'edit' : 'plan'
+  mode.value = newMode
+  
+  if (newMode === 'edit' && sessionId.value) {
+    loadTodosForEditMode()
+  }
 }
 
 const fetchTokenUsage = async () => {
@@ -1429,6 +1463,7 @@ const handleResetSession = async () => {
     selectedTool.value = null
     pendingQuestionData.value = null
     latestProgress.value = null
+    todos.value = []
     designDocuments.value = []
     selectedDesignDoc.value = null
     
@@ -1537,10 +1572,6 @@ const stopDraggingVertical = () => {
   document.removeEventListener('mouseup', stopDraggingVertical)
   document.body.style.cursor = ''
   document.body.style.userSelect = ''
-}
-
-const handleSelectTool = (tool) => {
-  selectedTool.value = tool
 }
 
 // ============================================================================
@@ -1654,12 +1685,51 @@ const handleSaveDesignDoc = async ({ docType, content }) => {
   }
 }
 
-// Watch for mode changes and session changes to fetch design docs
+// Watch for mode changes and session changes
 watch([mode, sessionId], async ([newMode, newSessionId]) => {
   if (newMode === 'plan' && newSessionId) {
     await fetchDesignDocuments()
   }
 })
+
+// Todo management
+const loadTodosForEditMode = async () => {
+  if (!sessionId.value) return
+  const fetched = await fetchTodos(sessionId.value)
+  todos.value = fetched
+  if (fetched.length === 0) {
+    // Auto-generate if empty
+    handleGenerateTodos()
+  }
+}
+
+const handleGenerateTodos = async () => {
+  if (!sessionId.value || isGeneratingTodos.value) return
+  isGeneratingTodos.value = true
+  try {
+    const newTodos = await generateTodos(sessionId.value)
+    todos.value = newTodos
+  } catch (e) {
+    console.error('Failed to generate todos:', e)
+  } finally {
+    isGeneratingTodos.value = false
+  }
+}
+
+const handleDeleteTodo = async (id) => {
+  if (!sessionId.value) return
+  const updated = todos.value.filter(t => t.id !== id)
+  todos.value = updated // optimistic update
+  await updateTodos(sessionId.value, updated)
+}
+
+const handleProcessTodo = (todo) => {
+  if (!todo) return
+  inputMessage.value = `Process Todo #${todo.id}: ${todo.content}`
+  if (inputRef.value) {
+    inputRef.value.focus()
+  }
+}
 
 const sendMessage = async () => {
   if (!inputMessage.value.trim() || isSending.value || !sessionId.value) return
@@ -1817,6 +1887,9 @@ const sendMessage = async () => {
             if (progressData) {
               console.log('[Progress] Found progress data, storing in center pane')
               latestProgress.value = progressData
+              if (progressData.todos) {
+                todos.value = progressData.todos
+              }
             }
             
             // Check if the agent returned structured questions
@@ -2058,6 +2131,9 @@ const handleSelectSession = async (id) => {
             if (progressData) {
               console.log('[Progress] Found progress data in message', i)
               latestProgress.value = progressData
+              if (progressData.todos) {
+                todos.value = progressData.todos
+              }
               break // Use the most recent progress
             }
           }
@@ -2215,6 +2291,9 @@ const initializeSession = async () => {
                 if (progressData) {
                   console.log('[Progress] Found progress data in message', i, '(init)')
                   latestProgress.value = progressData
+                  if (progressData.todos) {
+                    todos.value = progressData.todos
+                  }
                   break // Use the most recent progress
                 }
               }

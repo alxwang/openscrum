@@ -1121,6 +1121,24 @@ if SESSION_AVAILABLE:
             from storage import update_todos
         update_todos(session_id, todos)
         return todos
+        
+    @app.post("/sessions/{session_id}/todo/generate", summary="Auto-generate todo list from context")
+    def session_todo_generate(session_id: str):
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            
+            try:
+                from server.agent.todo_generator import generate_todos_for_session
+            except ImportError:
+                from agent.todo_generator import generate_todos_for_session
+                
+            merged_todos = generate_todos_for_session(session_id, workspace_root_path)
+            return merged_todos
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
     
     @app.post("/sessions/{session_id}/compress", summary="Compress session context")
     async def compress_session_context(session_id: str):

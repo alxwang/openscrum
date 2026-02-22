@@ -484,49 +484,12 @@ def editor_node(
     # Using BEAST_PROVIDER_SYSTEM as the main system prompt for edit mode
     system_prompt = registry.get_prompt("BEAST_PROVIDER_SYSTEM", force_json=True)
     
-    # Add CRITICAL progress reporting requirement at the TOP (before everything else)
-    progress_critical = """\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-<MANDATORY_PROGRESS_REPORTING>
-🚨 CRITICAL REQUIREMENT - NON-NEGOTIABLE 🚨
-
-After EVERY SINGLE tool execution, you MUST provide a progress update in this EXACT JSON format:
-
-{
-  "plan": {
-    "1": "Step 1 description",
-    "2": "Step 2 description",
-    "3": "Step 3 description"
-  },
-  "current_progress": {
-    "step": 2,
-    "status": "What was just completed",
-    "next_step": "What you will do next"
-  }
-}
-
-WITHOUT THIS PROGRESS UPDATE, THE USER CANNOT SEE WHAT YOU'RE DOING.
-This is NOT optional - it is REQUIRED after EVERY tool call.
-Progress reports help users understand your execution flow.
-</MANDATORY_PROGRESS_REPORTING>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"""
-    system_prompt = progress_critical + system_prompt
-    
     # Add mode reminder 
     mode_reminder = f"\n\n<MODE_CONTEXT>\nUSER SELECTED MODE: {user_mode.upper()}\n"
     if user_mode == "edit":
         mode_reminder += "You are in EDIT/BUILD MODE - You CAN make file edits and execute tools to implement solutions.\n"
     mode_reminder += "</MODE_CONTEXT>\n\n"
     system_prompt = system_prompt + mode_reminder
-    
-    # Add execution progress reporting instructions (detailed version)
-    execution_progress_prompt = registry.get_prompt("EXECUTION_PROGRESS_SYSTEM_REMINDER", force_json=False)
-    system_prompt = system_prompt.rstrip() + "\n\n" + execution_progress_prompt
-    
-    # Add ANOTHER reminder at the end for emphasis
-    progress_reminder_end = """\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔄 REMINDER: After EACH tool execution → Provide progress JSON update
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"""
-    system_prompt = system_prompt.rstrip() + progress_reminder_end
     
     if workspace_root:
         parts = instruction_system(workspace_root)
@@ -777,6 +740,13 @@ def create_agent_graph(
     tools = get_tools(workspace_root=workspace_root)
     workflow.add_node("tools", create_sequential_tool_node(tools))
     
+    # Add Todo Tracker node
+    try:
+        from server.agent.todo_tracker import todo_tracker_node
+    except ImportError:
+        from todo_tracker import todo_tracker_node
+    workflow.add_node("todo_tracker", todo_tracker_node)
+    
     # Entry: when user said "proceed with your plan", go to editor; else planner
     workflow.set_entry_point("router")
     workflow.add_conditional_edges("router", route_entry, {"planner": "planner", "editor": "editor"})
@@ -803,12 +773,13 @@ def create_agent_graph(
     )
     
     # Route tools back based on mode
-    def route_from_tools(state: AgentState) -> Literal["planner", "editor"]:
+    def route_from_tools(state: AgentState) -> Literal["planner", "todo_tracker"]:
         """After tools execute, return to the appropriate node based on mode."""
         mode = state.get("mode", "plan")
-        return "planner" if mode == "plan" else "editor"
+        return "planner" if mode == "plan" else "todo_tracker"
     
-    workflow.add_conditional_edges("tools", route_from_tools, {"planner": "planner", "editor": "editor"})
+    workflow.add_conditional_edges("tools", route_from_tools, {"planner": "planner", "todo_tracker": "todo_tracker"})
+    workflow.add_edge("todo_tracker", "editor")
     
     return workflow.compile()
 
