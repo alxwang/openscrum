@@ -9,6 +9,9 @@ const STORAGE_KEY = 'openscrum_session_id'
 const sessionId = ref(null)
 const modelName = ref('')
 
+// AbortController for canceling ongoing requests
+let currentAbortController = null
+
 // Load session ID from localStorage
 function loadSessionId() {
   if (typeof window !== 'undefined') {
@@ -151,6 +154,9 @@ export function useApiClient() {
       requestData.workspace_root = window.location.pathname || ''
     }
 
+    // Create new AbortController for this request
+    currentAbortController = new AbortController()
+
     try {
       // Use relative path - fetch resolves against current origin; avoid new URL() with /api base
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -159,6 +165,7 @@ export function useApiClient() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(requestData),
+        signal: currentAbortController.signal,
       })
 
       if (!response.ok) {
@@ -193,8 +200,23 @@ export function useApiClient() {
         }
       }
     } catch (error) {
+      // Don't log abort errors as errors - they're expected
+      if (error.name === 'AbortError') {
+        console.log('Request aborted by user')
+        return // Don't throw on abort
+      }
       console.error('Error sending message:', error)
       throw error
+    } finally {
+      currentAbortController = null
+    }
+  }
+
+  const abortCurrentRequest = () => {
+    if (currentAbortController) {
+      console.log('Aborting current request...')
+      currentAbortController.abort()
+      currentAbortController = null
     }
   }
 
@@ -235,6 +257,16 @@ export function useApiClient() {
       return response.data
     } catch (error) {
       console.error('Failed to reset session:', error)
+      throw error
+    }
+  }
+
+  const abortSession = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/abort`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to abort session:', error)
       throw error
     }
   }
@@ -390,10 +422,12 @@ export function useApiClient() {
     setSession,
     clearSession,
     sendMessage,
+    abortCurrentRequest,
     replyToPermission,
     compressContext,
     resetContext,
     resetSession,
+    abortSession,
     getTokenUsage,
     analyzeWorkspace,
     fetchSyncStatus,

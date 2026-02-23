@@ -17,7 +17,7 @@
             'w-full text-left px-3 py-2 rounded-lg transition-colors group',
             selectedDoc === docType 
               ? 'bg-accent text-text-inverse' 
-              : 'bg-surface-dark hover:bg-surface text-text hover:text-surface-dark'
+              : 'bg-surface-dark hover:bg-surface text-text-inverse hover:text-surface-dark'
           ]"
         >
           <div class="flex items-center gap-2">

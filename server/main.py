@@ -1376,8 +1376,11 @@ if SESSION_AVAILABLE:
         1. Deleting all messages
         2. Deleting all files in workspace directory
         3. Deleting design documents
+        4. Deleting todos
         This completely resets the session to a fresh state.
         """
+        _log = logging.getLogger(__name__)
+        
         try:
             session_svc = get_session()
             
@@ -1400,8 +1403,14 @@ if SESSION_AVAILABLE:
                         session_svc.remove_message(session_id, msg_id)
                         deleted_messages += 1
                     except Exception as e:
-                        _log = logging.getLogger(__name__)
                         _log.warning(f"Failed to remove message {msg_id}: {e}")
+            
+            # Delete todos
+            try:
+                from server.storage import update_todos
+            except ImportError:
+                from storage import update_todos
+            update_todos(session_id, [])
             
             # Delete all files in workspace (except .openscrum directory metadata)
             if workspace_root.exists():
@@ -1423,8 +1432,15 @@ if SESSION_AVAILABLE:
                             shutil.rmtree(item)
                             deleted_files += 1
                     except Exception as e:
-                        _log = logging.getLogger(__name__)
                         _log.warning(f"Failed to remove {item}: {e}")
+            
+            # Create default Agent.md after clearing workspace
+            try:
+                from server.workspace import create_default_agent_rules
+                create_default_agent_rules(workspace_root)
+                _log.info(f"Created default Agent.md for session {session_id}")
+            except Exception as e:
+                _log.warning(f"Failed to create default Agent.md: {e}")
             
             return {
                 "message": f"Session reset complete - deleted {deleted_messages} messages and {deleted_files} files/directories",
@@ -1434,7 +1450,6 @@ if SESSION_AVAILABLE:
         except HTTPException:
             raise
         except Exception as e:
-            _log = logging.getLogger(__name__)
             _log.error(f"Failed to reset session: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to reset session: {str(e)}")
     
@@ -1531,6 +1546,31 @@ if SESSION_AVAILABLE:
             "skipped": skipped_count,
             "total": len(all_sessions),
         }
+
+    @app.post("/sessions/{session_id}/abort", summary="Abort current session operation")
+    async def abort_session(session_id: str):
+        """
+        Abort the current operation for a session.
+        Sets the session status back to idle.
+        """
+        try:
+            session_svc = get_session()
+            
+            # Check if session exists
+            try:
+                session = session_svc.get(session_id)
+            except NotFoundError:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            
+            # Set status back to idle
+            SessionStatus.set(session_id, {"type": "idle"})
+            
+            return {"status": "aborted", "session_id": session_id}
+        
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/sessions/{session_id}/message", summary="Send message to session")
     async def session_message(session_id: str, request: ChatRequest):

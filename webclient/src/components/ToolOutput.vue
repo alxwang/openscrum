@@ -23,7 +23,7 @@
       <div v-if="tool.input" class="border-b border-surface-dark">
         <div class="px-4 py-2 bg-surface-dark/30">
           <h4 class="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">Input</h4>
-          <pre class="text-xs text-text-inverse bg-background rounded p-2 overflow-x-auto custom-scrollbar">{{ formatInput(tool.input) }}</pre>
+          <pre class="text-xs text-text-inverse bg-background-dark rounded p-2 overflow-x-auto custom-scrollbar">{{ formatInput(tool.input) }}</pre>
         </div>
       </div>
       

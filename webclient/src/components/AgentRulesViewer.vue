@@ -10,21 +10,21 @@
         <button
           v-if="!isEditing"
           @click="startEditing"
-          class="px-3 py-1.5 text-xs rounded-lg bg-accent hover:bg-accent-hover transition-colors"
+          class="px-3 py-1.5 text-xs rounded-lg bg-accent hover:bg-accent-hover text-white transition-colors"
         >
           Edit
         </button>
         <template v-else>
           <button
             @click="cancelEditing"
-            class="px-3 py-1.5 text-xs rounded-lg bg-surface-dark hover:bg-surface transition-colors"
+            class="px-3 py-1.5 text-xs rounded-lg bg-surface-dark hover:bg-surface text-text-inverse hover:text-surface-dark transition-colors"
           >
             Cancel
           </button>
           <button
             @click="saveChanges"
             :disabled="!hasChanges"
-            class="px-3 py-1.5 text-xs rounded-lg bg-green-600 hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            class="px-3 py-1.5 text-xs rounded-lg bg-green-600 hover:bg-green-700 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Save
           </button>

@@ -47,7 +47,7 @@
           node.type === 'directory' ? 'text-text-inverse font-medium group-hover:text-surface-dark' : '',
           node.type === 'file' && node.path === selectedFile
             ? 'text-text-inverse font-medium'
-            : (node.type === 'directory' ? '' : 'text-text group-hover:text-surface-dark font-medium')
+            : (node.type === 'directory' ? '' : 'text-text-inverse group-hover:text-surface-dark font-medium')
         ]"
       >
         {{ displayName }}

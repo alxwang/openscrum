@@ -103,7 +103,7 @@
           This will permanently destroy the API records, LLM conversation memory log, and the physical workspace directory containing all traced code.
         </p>
         <div class="flex justify-end gap-3">
-          <button @click="sessionToDelete = null" :disabled="isDeleting" class="px-4 py-2 bg-surface text-text-inverse rounded hover:bg-surface-light transition-colors">
+          <button @click="sessionToDelete = null" :disabled="isDeleting" class="px-4 py-2 bg-surface text-surface-dark rounded hover:bg-surface-light transition-colors">
             Cancel
           </button>
           <button @click="confirmDelete" :disabled="isDeleting" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded font-medium transition-colors">

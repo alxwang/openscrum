@@ -2,53 +2,67 @@
   <div class="min-h-screen bg-background dark-mode">
     <div class="flex flex-col h-screen">
       <!-- Header -->
-      <header class="border-b border-surface-dark px-6 py-4">
+      <header 
+        :class="[
+          'border-b px-6 py-4 transition-colors duration-300',
+          mode === 'plan' 
+            ? 'bg-blue-900/60 border-blue-700' 
+            : 'bg-orange-900/60 border-orange-700'
+        ]"
+      >
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
             <button
               @click="handleExitSession"
-              class="px-3 py-1.5 text-sm rounded-lg bg-surface-dark hover:bg-surface-dark/80 transition-colors text-text-inverse"
+              class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-white font-semibold border border-gray-600"
               title="Exit Session"
             >
               Exit Session
             </button>
-            <h1 class="text-xl font-semibold text-text-inverse">OpenScrum Agent</h1>
-            <span v-if="modelName" class="text-sm text-text-muted">
+            <h1 class="text-xl font-bold text-white">OpenScrum Agent</h1>
+            <span v-if="modelName" class="text-sm text-gray-200 font-medium">
               {{ modelName }}
             </span>
-            <span v-if="currentSession" class="text-xl font-semibold text-cyan-400 flex items-center gap-3">
+            <span v-if="currentSession" class="text-xl font-bold text-cyan-200 flex items-center gap-3">
               {{ sessionDisplayName }}
               
               <!-- Workspace Status Indicator -->
               <div v-if="workspaceStatus" class="flex items-center gap-2 text-xs font-normal tracking-wide">
-                <span class="px-2 py-1 rounded bg-surface-dark text-text-muted border border-surface" v-if="workspaceStatus.has_code || workspaceStatus.has_design_docs">
+                <span 
+                  :class="[
+                    'px-2 py-1 text-xs font-bold rounded border-2 transition-colors',
+                    mode === 'plan' 
+                      ? 'bg-blue-800 text-blue-100 border-blue-500' 
+                      : 'bg-orange-800 text-orange-100 border-orange-500'
+                  ]"
+                >
+                  {{ mode === 'plan' ? '📋 Plan' : '✏️ Edit' }}
+                </span>
+                <span class="px-2 py-1 rounded bg-gray-800 text-white font-semibold border border-gray-500" v-if="workspaceStatus.has_code || workspaceStatus.has_design_docs">
                   <span v-if="workspaceStatus.has_code">{{ workspaceStatus.code_file_count }} files</span>
                   <span v-if="workspaceStatus.has_code && workspaceStatus.has_design_docs"> | </span>
                   <span v-if="workspaceStatus.has_design_docs">{{ workspaceStatus.design_doc_count }} docs</span>
                 </span>
-                <span class="px-2 py-1 rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20" v-if="workspaceStatus.needs_sync" title="Code and design docs might be out of sync">
+                <span class="px-2 py-1 rounded bg-yellow-900 text-yellow-200 font-semibold border border-yellow-600" v-if="workspaceStatus.needs_sync" title="Code and design docs might be out of sync">
                   ⚠️ Needs Sync
                 </span>
-                <span class="px-2 py-1 rounded bg-green-500/10 text-green-400 border border-green-500/20" v-if="!workspaceStatus.has_code && !workspaceStatus.has_design_docs">
+                <span class="px-2 py-1 rounded bg-green-900 text-green-200 font-semibold border border-green-600" v-if="!workspaceStatus.has_code && !workspaceStatus.has_design_docs">
                   🌱 Empty Workspace
                 </span>
               </div>
             </span>
           </div>
           <div class="flex items-center gap-4">
-            <span class="text-sm text-text-muted">
-              Mode: <span class="font-medium">{{ mode === 'plan' ? 'Plan' : 'Edit' }}</span>
-            </span>
             <button
               @click="toggleMode"
-              class="px-3 py-1.5 text-sm rounded-lg bg-surface-dark hover:bg-surface-dark/80 transition-colors"
+              class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-white font-semibold border border-gray-600"
             >
               Switch to {{ mode === 'plan' ? 'Edit' : 'Plan' }}
             </button>
             <button
               @click="handleCompressContext"
               :disabled="!sessionId || messages.length === 0"
-              class="px-3 py-1.5 text-sm rounded-lg bg-surface-dark hover:bg-surface-dark/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-white font-semibold border border-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
               title="Compress conversation history to reduce context size"
             >
               Compress Context
@@ -56,7 +70,7 @@
             <button
               @click="handleResetContext"
               :disabled="!sessionId || messages.length === 0"
-              class="px-3 py-1.5 text-sm rounded-lg bg-red-600 hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              class="px-3 py-1.5 text-sm rounded-lg bg-red-700 hover:bg-red-600 transition-colors text-white font-semibold border border-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
               title="Clear all conversation history (cannot be undone)"
             >
               Reset Context
@@ -64,7 +78,7 @@
             <button
               @click="handleResetSession"
               :disabled="!sessionId"
-              class="px-3 py-1.5 text-sm rounded-lg bg-red-700 hover:bg-red-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              class="px-3 py-1.5 text-sm rounded-lg bg-red-800 hover:bg-red-700 transition-colors text-white font-semibold border border-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
               title="Reset entire session - deletes all messages AND workspace files (cannot be undone)"
             >
               Reset Session
@@ -176,11 +190,19 @@
                     :show="tokenUsage.tokenCount > 0"
                   />
                   <button
+                    v-show="!isSending"
                     @click="sendMessage"
-                    :disabled="!inputMessage.trim() || isSending || !sessionId || pendingQuestionData"
+                    :disabled="!inputMessage.trim() || !sessionId || pendingQuestionData"
                     class="px-6 py-3 bg-accent hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium transition-colors"
                   >
                     Send
+                  </button>
+                  <button
+                    v-show="isSending"
+                    @click="handleAbortAgent"
+                    class="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg transition-colors shadow-lg"
+                  >
+                    ⏹ STOP
                   </button>
                 </div>
               </div>
@@ -265,117 +287,42 @@
           :class="{ 'bg-accent': isDraggingRight }"
         ></div>
 
-        <!-- Right Pane: Document/Console & Code Viewers -->
+        <!-- Right Pane: Console & Agent Rules -->
         <div class="flex flex-col bg-surface/30 right-pane" :style="{ width: (100 - leftPaneWidth - centerPaneWidth) + '%' }">
-          
-          <!-- Plan Mode: Full Size Code Viewer OR Design Document Viewer -->
-          <div v-if="mode === 'plan'" class="h-full bg-white p-2">
-            <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
-              <!-- Code File Viewer -->
-              <template v-if="selectedCodeFile">
-                <CodeViewer
-                  :path="selectedCodeFile"
-                  :content="selectedCodeFileContent"
-                  :loading="isCodeFileLoading"
-                  :error="codeFileError"
-                  @close="handleCloseCodeFile"
+          <!-- Console Viewer with Tabs (Both Modes) -->
+          <div class="h-full bg-surface-dark overflow-hidden flex flex-col">
+            <!-- Tab Bar -->
+            <div class="flex items-center px-4 pt-2 bg-surface border-b border-surface-dark">
+              <button
+                @click="activeEditTab = 'console'"
+                class="px-4 py-2 text-sm font-medium transition-colors border-b-2"
+                :class="activeEditTab === 'console' ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-accent'"
+              >
+                Console
+              </button>
+              <button
+                @click="switchToAgentRulesTab"
+                class="px-4 py-2 text-sm font-medium transition-colors border-b-2"
+                :class="activeEditTab === 'rules' ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-accent'"
+              >
+                Agent Rules
+              </button>
+            </div>
+            
+            <div class="flex-1 bg-white p-2 pb-1 overflow-hidden">
+              <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
+                <!-- Console Tab -->
+                <ConsoleViewer v-if="activeEditTab === 'console'" ref="consoleViewerRef" :output="consoleOutput" />
+                
+                <!-- Agent Rules Tab -->
+                <AgentRulesViewer
+                  v-else-if="activeEditTab === 'rules'"
+                  :content="agentRulesContent"
+                  @save="handleSaveAgentRules"
                 />
-              </template>
-              <!-- Design Document Viewer -->
-              <template v-else>
-                <DesignDocViewer
-                  v-if="hasAnyDesignDocs"
-                  :docType="selectedDesignDoc"
-                  :docInfo="designDocInfo"
-                  :content="selectedDesignDocContent"
-                  @save="handleSaveDesignDoc"
-                  @sync="handleSyncSingleDoc"
-                />
-                <div v-else class="flex flex-col items-center justify-center h-full bg-surface-dark">
-                  <!-- Empty Right Pane -->
-                </div>
-              </template>
+              </div>
             </div>
           </div>
-          
-          <!-- Edit Mode: Split Pane (Console Top, Code Viewer Bottom) -->
-          <template v-else-if="mode === 'edit'">
-            <!-- Top Section - Console Viewer or Agent Rules -->
-            <div class="bg-surface-dark overflow-hidden flex flex-col" :style="{ height: rightTopHeight + '%' }">
-              <!-- Tab Bar -->
-              <div class="flex items-center px-4 pt-2 bg-surface border-b border-surface-dark">
-                <button
-                  @click="activeEditTab = 'console'"
-                  class="px-4 py-2 text-sm font-medium transition-colors border-b-2"
-                  :class="activeEditTab === 'console' ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text-inverse'"
-                >
-                  Console
-                </button>
-                <button
-                  @click="switchToAgentRulesTab"
-                  class="px-4 py-2 text-sm font-medium transition-colors border-b-2"
-                  :class="activeEditTab === 'rules' ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text-inverse'"
-                >
-                  Agent Rules
-                </button>
-              </div>
-              
-              <div class="flex-1 bg-white p-2 pb-1 overflow-hidden">
-                <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
-                  <!-- Console Tab -->
-                  <ConsoleViewer v-if="activeEditTab === 'console'" ref="consoleViewerRef" :output="consoleOutput" />
-                  
-                  <!-- Agent Rules Tab -->
-                  <AgentRulesViewer
-                    v-else-if="activeEditTab === 'rules'"
-                    :content="agentRulesContent"
-                    @save="handleSaveAgentRules"
-                  />
-                </div>
-              </div>
-            </div>
-            
-            <!-- Horizontal Draggable Divider -->
-            <div 
-              @mousedown="startDraggingVertical"
-              class="h-1 bg-surface-dark hover:bg-accent cursor-row-resize transition-colors flex-shrink-0"
-              :class="{ 'bg-accent': isDraggingVertical }"
-            ></div>
-            
-            <!-- Bottom Section - Code Viewer -->
-            <div class="bg-surface-dark flex-1 overflow-hidden" :style="{ height: (100 - rightTopHeight) + '%' }">
-              <div class="h-full bg-white p-2 pt-1">
-                <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-sm flex flex-col">
-                  <template v-if="selectedCodeFile">
-                    <CodeViewer
-                      :path="selectedCodeFile"
-                      :content="selectedCodeFileContent"
-                      :loading="isCodeFileLoading"
-                      :error="codeFileError"
-                      @close="handleCloseCodeFile"
-                    />
-                  </template>
-                  <DesignDocViewer
-                    v-else-if="selectedDesignDoc"
-                    :docType="selectedDesignDoc"
-                    :docInfo="designDocInfo"
-                    :content="selectedDesignDocContent"
-                    @save="handleSaveDesignDoc"
-                    @sync="handleSyncSingleDoc"
-                    @close="handleCloseDesignDoc"
-                  />
-                  <div v-else class="flex flex-col items-center justify-center h-full text-text-muted bg-surface/50">
-                    <div class="w-12 h-12 rounded-full bg-surface-dark/50 flex items-center justify-center mb-3">
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                      </svg>
-                    </div>
-                    <p class="text-sm">Select a file from the tree to view its contents</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </template>
         </div>
       </div>
 
@@ -403,6 +350,58 @@
         @submit="handleQuestionSubmit"
         @skip="handleQuestionSkip"
       />
+
+      <!-- Document/Code Viewer Modal -->
+      <div
+        v-if="showViewerModal"
+        class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+        @click.self="showViewerModal = false"
+      >
+        <div class="bg-surface rounded-lg shadow-2xl w-full max-w-6xl h-[85vh] flex flex-col overflow-hidden">
+          <!-- Modal Header -->
+          <div class="flex items-center justify-between px-6 py-4 border-b border-surface-dark bg-surface-dark/50">
+            <div class="flex items-center gap-3">
+              <span class="text-2xl">{{ modalViewerType === 'design-doc' ? '📄' : '📝' }}</span>
+              <div>
+                <h2 class="text-lg font-semibold text-text-inverse">{{ modalViewerTitle }}</h2>
+                <p v-if="modalViewerType === 'design-doc' && modalViewerInfo.description" class="text-xs text-text-muted mt-1">{{ modalViewerInfo.description }}</p>
+              </div>
+            </div>
+            <button
+              @click="showViewerModal = false"
+              class="p-2 hover:bg-surface rounded-lg transition-colors text-text-muted hover:text-surface-dark"
+            >
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <!-- Modal Content -->
+          <div class="flex-1 overflow-hidden bg-white p-4">
+            <div class="h-full rounded-md overflow-hidden bg-surface-dark shadow-inner">
+              <!-- Design Doc Viewer -->
+              <DesignDocViewer
+                v-if="modalViewerType === 'design-doc'"
+                :docType="modalViewerPath"
+                :docInfo="modalViewerInfo"
+                :content="modalViewerContent"
+                @save="handleSaveDesignDocModal"
+                @sync="handleSyncSingleDoc"
+              />
+              <!-- Code File Viewer -->
+              <CodeViewer
+                v-else-if="modalViewerType === 'code-file'"
+                :path="modalViewerPath"
+                :content="modalViewerContent"
+                :loading="false"
+                :error="null"
+                @close="showViewerModal = false"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -433,10 +432,12 @@ const {
   updateSession,
   clearSession,
   sendMessage: apiSendMessage,
+  abortCurrentRequest,
   replyToPermission,
   compressContext,
   resetContext,
   resetSession,
+  abortSession,
   getTokenUsage,
   analyzeWorkspace,
   fetchSyncStatus,
@@ -501,6 +502,14 @@ const selectedCodeFileContent = ref('')
 const isCodeFileLoading = ref(false)
 const codeFileError = ref(null)
 
+// Modal state for viewing docs/code
+const showViewerModal = ref(false)
+const modalViewerType = ref(null) // 'design-doc' or 'code-file'
+const modalViewerTitle = ref('')
+const modalViewerContent = ref('')
+const modalViewerPath = ref('')
+const modalViewerInfo = ref({})
+
 // Edit mode state
 const consoleOutput = ref('')
 const consoleViewerRef = ref(null)
@@ -545,6 +554,9 @@ const tokenUsage = ref({
   model: '',
   messageCount: 0,
 })
+
+// File tree refresh trigger
+const syncRefreshCounter = ref(0)
 
 // Copy to clipboard tracking
 const copiedMessageIndex = ref(null)
@@ -1498,6 +1510,39 @@ const handleResetContext = async () => {
   }
 }
 
+const handleAbortAgent = async () => {
+  if (!sessionId.value) return
+  
+  try {
+    console.log('Aborting agent execution...')
+    
+    // First, cancel the ongoing streaming request
+    abortCurrentRequest()
+    
+    // Then call the abort API endpoint to set session status to idle
+    await abortSession(sessionId.value)
+    
+    // Reset UI state
+    isSending.value = false
+    updateSessionState('idle')
+    
+    // Add a system message indicating abortion
+    messages.value.push({
+      id: `system-${Date.now()}`,
+      role: 'system',
+      content: '[Agent execution stopped by user]',
+      timestamp: new Date().toISOString()
+    })
+    
+    console.log('Agent execution aborted successfully')
+  } catch (error) {
+    console.error('Failed to abort agent:', error)
+    // Reset UI state anyway even if the API call fails
+    isSending.value = false
+    updateSessionState('idle')
+  }
+}
+
 const handleResetSession = async () => {
   if (!sessionId.value) {
     console.warn('No session ID to reset session')
@@ -1520,15 +1565,52 @@ const handleResetSession = async () => {
     todos.value = []
     designDocuments.value = []
     selectedDesignDoc.value = null
+    selectedCodeFile.value = null
+    selectedCodeFileContent.value = ''
+    consoleOutput.value = ''
     
     // Clear session state
     clearSessionState()
     
     // Reset pane width to default
     leftPaneWidth.value = calculateOptimalChatWidth()
+    centerPaneWidth.value = 30
+    
+    // Reload all components
+    try {
+      // Reload workspace status
+      workspaceStatus.value = await analyzeWorkspace(sessionId.value)
+      console.log('Reloaded workspace status after reset')
+    } catch (e) {
+      console.error('Failed to reload workspace status:', e)
+      workspaceStatus.value = null
+    }
+    
+    try {
+      // Reload sync status
+      syncStatus.value = await fetchSyncStatus(sessionId.value)
+      console.log('Reloaded sync status after reset')
+    } catch (e) {
+      console.error('Failed to reload sync status:', e)
+      syncStatus.value = null
+    }
+    
+    // Trigger file tree reload
+    syncRefreshCounter.value++
+    console.log('Triggered file tree reload after reset')
     
     // Update token usage after reset
     await fetchTokenUsage()
+    
+    // Fetch design documents if in plan mode
+    if (mode.value === 'plan') {
+      console.log('[Design] Reloading design documents after reset (mode is plan)')
+      await fetchDesignDocuments()
+    }
+    
+    // Scroll to ensure UI is in correct state
+    await nextTick()
+    scrollToBottom()
     
     console.log('Session reset successfully:', result)
     alert(`Session reset complete!\n\nDeleted ${result.deleted_messages} messages and ${result.deleted_files} files/directories.`)
@@ -1663,6 +1745,16 @@ const handleSelectDesignDoc = async (docType) => {
           name: data.name,
           description: designDocuments.value[docType]?.description || ''
         }
+        // Open in modal
+        modalViewerType.value = 'design-doc'
+        modalViewerTitle.value = data.name
+        modalViewerContent.value = data.content
+        modalViewerPath.value = docType
+        modalViewerInfo.value = {
+          name: data.name,
+          description: designDocuments.value[docType]?.description || ''
+        }
+        showViewerModal.value = true
       } else {
         selectedDesignDocContent.value = null
         designDocInfo.value = {
@@ -1694,6 +1786,12 @@ const handleSelectCodeFile = async (path) => {
   try {
     const content = await fetchWorkspaceFile(sessionId.value, path)
     selectedCodeFileContent.value = content
+    // Open in modal
+    modalViewerType.value = 'code-file'
+    modalViewerTitle.value = path
+    modalViewerContent.value = content
+    modalViewerPath.value = path
+    showViewerModal.value = true
   } catch (error) {
     console.error('[Code] Failed to fetch code file:', error)
     codeFileError.value = 'Failed to load code file content.'
@@ -1732,6 +1830,10 @@ const handleSaveAgentRules = async (content) => {
     await saveWorkspaceFile(sessionId.value, 'Agent.md', content)
     agentRulesContent.value = content
     console.log('[AgentRules] Successfully saved Agent.md')
+    
+    // Refresh file tree to show the new/updated file
+    syncRefreshCounter.value++
+    console.log('[FileTree] Triggering file tree reload after saving Agent.md')
   } catch (error) {
     console.error('[AgentRules] Failed to save Agent.md:', error)
     alert('Failed to save custom rules. ' + error.message)
@@ -1779,6 +1881,16 @@ const handleSaveDesignDoc = async ({ docType, content }) => {
       
       // Refresh document list to update timestamps
       await fetchDesignDocuments()
+      
+      // Refresh file tree to show the updated design doc
+      syncRefreshCounter.value++
+
+const handleSaveDesignDocModal = async ({ docType, content }) => {
+  await handleSaveDesignDoc({ docType, content })
+  // Update modal content after saving
+  modalViewerContent.value = content
+}
+      console.log('[FileTree] Triggering file tree reload after saving design doc')
     } else {
       console.error('[Design] Failed to save document:', await response.text())
     }
@@ -1945,8 +2057,9 @@ const sendMessage = async () => {
           // Handle permission request
           const perm = chunk.permission_request || {}
           console.log('[Stream] Permission request, showing dialog')
+          const toolName = perm.permission || perm.tool_name || perm.tool || 'unknown tool'
           // Update state to waiting for permission
-          updateSessionState('waiting_permission', true, 'Permission required...', perm.tool || null)
+          updateSessionState('waiting_permission', true, 'Permission required...', toolName)
           
           let permInput = perm.tool_input || {}
           try {
@@ -1954,7 +2067,7 @@ const sendMessage = async () => {
             permInput = JSON.stringify(permInput, null, 2).replace(/\n/g, '\r\n')
           } catch(e) {}
           
-          consoleOutput.value += `\r\n\x1b[31;1m[Permission Required]\x1b[0m \x1b[36m${perm.tool}\x1b[0m\r\n\x1b[90m${permInput}\x1b[0m\r\n`
+          consoleOutput.value += `\r\n\x1b[31;1m[Permission Required]\x1b[0m \x1b[36m${toolName}\x1b[0m\r\n\x1b[90m${permInput}\x1b[0m\r\n`
           
           await nextTick()
           scrollToBottom()
@@ -1965,7 +2078,7 @@ const sendMessage = async () => {
           
           // After user responds, update state accordingly
           if (reply && reply.decision === 'approved') {
-            updateSessionState('executing_tool', true, 'Tool executing...', perm.tool || null)
+            updateSessionState('executing_tool', true, 'Tool executing...', toolName)
             console.log('[Stream] Permission approved, state:', sessionState.value)
           } else if (reply && reply.decision === 'rejected') {
             updateSessionState('thinking', true, 'Permission denied, continuing...')
@@ -2033,6 +2146,10 @@ const sendMessage = async () => {
           updateSessionState('idle', false)
           currentTool.value = null
           currentToolCommand.value = null
+          
+          // Reload file tree after Agent completes task (files may have changed)
+          syncRefreshCounter.value++
+          console.log('[FileTree] Triggering file tree reload after task completion')
           
           // In Plan Mode, refetch design documents after Agent finishes
           // (Agent may have created/updated design docs via tool_calls)
