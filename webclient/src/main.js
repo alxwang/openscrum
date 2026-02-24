@@ -4,6 +4,8 @@ import PrimeVue from 'primevue/config'
 import 'primeicons/primeicons.css'
 import App from './App.vue'
 import './style.css'
+import VueDiff from 'vue-diff'
+import 'vue-diff/dist/index.css'
 
 const app = createApp(App)
 
@@ -11,5 +13,7 @@ const app = createApp(App)
 app.use(PrimeVue, {
   unstyled: false, // Use default PrimeVue styles where needed
 })
+
+app.use(VueDiff)
 
 app.mount('#app')

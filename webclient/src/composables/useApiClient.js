@@ -407,7 +407,37 @@ export function useApiClient() {
       return response.data || []
     } catch (error) {
       console.error('Failed to generate todos:', error)
-      return []
+      throw error
+    }
+  }
+
+  const getGitStatus = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}/git/status`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to get git status:', error)
+      return { has_changes: false, diff: '', error: String(error) }
+    }
+  }
+
+  const commitGitChanges = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/git/commit`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to auto-commit changes:', error)
+      throw error
+    }
+  }
+
+  const rejectGitChanges = async (id) => {
+    try {
+      const response = await client.post(`/sessions/${id}/git/reject`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to reject changes:', error)
+      throw error
     }
   }
 
@@ -438,6 +468,9 @@ export function useApiClient() {
     fetchTodos,
     updateTodos,
     generateTodos,
+    getGitStatus,
+    commitGitChanges,
+    rejectGitChanges,
     sessionId,
     modelName,
   }

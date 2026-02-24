@@ -1205,7 +1205,91 @@ if SESSION_AVAILABLE:
             return merged_todos
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+            
+    # --- GIT INTEGRATION ENDPOINTS ---
+
+    @app.get("/sessions/{session_id}/git/status", summary="Get current git status and diff")
+    def get_git_status(session_id: str):
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            
+            try:
+                from server.git_service import GitService
+            except ImportError:
+                from git_service import GitService
+                
+            git_svc = GitService(workspace_root_path)
+            return git_svc.get_status()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    @app.post("/sessions/{session_id}/git/commit", summary="Auto-commit changes using LLM for message")
+    def auto_commit_changes(session_id: str):
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            
+            try:
+                from server.git_service import GitService
+            except ImportError:
+                from git_service import GitService
+                
+            git_svc = GitService(workspace_root_path)
+            status = git_svc.get_status()
+            
+            if not status.get("has_changes"):
+                return {"success": True, "message": "No changes to commit."}
+                
+            diff_text = status.get("diff", "")
+            
+            # Generate commit message using LLM
+            import os
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import SystemMessage, HumanMessage
+            
+            model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+            llm = ChatOpenAI(model=model_name, temperature=0.1)
+            
+            sys_prompt = "You are an expert software engineer. Write a concise, conventional git commit message summarizing this diff. Do not include markdown formatting, backticks, or extra explanation. Just the raw message string. Keep it under 72 characters."
+            human_msg = f"Diff:\n{diff_text[:10000]}" # cap length for safety
+            
+            res = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=human_msg)])
+            commit_msg = str(res.content).strip().strip('`').strip('\"').strip('\'')
+            
+            if not commit_msg:
+                commit_msg = "Auto-commit from OpenScrum agent"
+                
+            success = git_svc.commit_changes(commit_msg)
+            return {"success": success, "commit_message": commit_msg}
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    @app.post("/sessions/{session_id}/git/reject", summary="Hard reset workspace changes")
+    def reject_git_changes(session_id: str):
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_name = session.get("workspace_name", f"session_{session_id}")
+            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            
+            try:
+                from server.git_service import GitService
+            except ImportError:
+                from git_service import GitService
+                
+            git_svc = GitService(workspace_root_path)
+            success = git_svc.reset_hard()
+            return {"success": success}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
     
+    # ---------------------------------
     @app.post("/sessions/{session_id}/compress", summary="Compress session context")
     async def compress_session_context(session_id: str):
         """

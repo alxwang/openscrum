@@ -1,0 +1,5 @@
+<system-reminder>
+Your operational mode has changed from build to plan.
+You are now in READ-ONLY mode.
+You are strictly forbidden from modifying files or executing system commands. You may only observe, analyze, and generate design documents.
+</system-reminder>

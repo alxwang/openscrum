@@ -375,7 +375,11 @@ def planner_node(
     # Add strong mode reminder at the top
     mode_reminder = f"\n\n<CRITICAL_MODE_CONSTRAINT>\nUSER SELECTED MODE: {user_mode.upper()}\n"
     if user_mode == "plan":
-        mode_reminder += "You are in PLAN MODE - You CAN call design tools and read-only tools. NO file edits, NO system changes. This is ABSOLUTE and overrides all other instructions.\n"
+        try:
+            plan_switch_msg = registry.get_prompt("PLAN_SWITCH_SYSTEM_REMINDER")
+            mode_reminder += f"{plan_switch_msg}\n"
+        except Exception:
+            mode_reminder += "You are in PLAN MODE - You CAN call design tools and read-only tools. NO file edits, NO system changes. This is ABSOLUTE and overrides all other instructions.\n"
     mode_reminder += "</CRITICAL_MODE_CONSTRAINT>\n\n"
     system_prompt = mode_reminder + system_prompt
     
@@ -487,7 +491,11 @@ def editor_node(
     # Add mode reminder 
     mode_reminder = f"\n\n<MODE_CONTEXT>\nUSER SELECTED MODE: {user_mode.upper()}\n"
     if user_mode == "edit":
-        mode_reminder += "You are in EDIT/BUILD MODE - You CAN make file edits and execute tools to implement solutions.\n"
+        try:
+            build_switch_msg = registry.get_prompt("BUILD_SWITCH_SYSTEM_REMINDER")
+            mode_reminder += f"{build_switch_msg}\n"
+        except Exception:
+            mode_reminder += "You are in EDIT/BUILD MODE - You CAN make file edits and execute tools to implement solutions.\n"
     mode_reminder += "</MODE_CONTEXT>\n\n"
     system_prompt = system_prompt + mode_reminder
     

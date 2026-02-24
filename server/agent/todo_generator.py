@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -46,19 +47,23 @@ def generate_todos_for_session(session_id: str, workspace_root: str) -> List[Dic
                     _log.warning(f"Could not read {md_file.name} for todo generation: {e}")
                     
     sys_prompt = """You are an expert Technical Project Manager.
-Your goal is to analyze the project's Design Documents and generate a list of actionable tasks (Todos) for the development agent.
+Your goal is to analyze the project's Design Documents and the Current Todo List, and output a SINGLE, Comprehensive, properly merged Todo List.
 
-DO NOT duplicate tasks that are already in the Current Todo List.
-Focus primarily on implementation steps that are defined in the design documents but haven't been completed or listed yet.
+CRITICAL RULES:
+1. MERGE & DEDUPLICATE: Retain all uncompleted tasks from the Current Todo List. Add any missing implementation steps defined in the Design Documents. DO NOT duplicate tasks.
+2. PRIORITY: Always order ALL steps based on strictly required **engineering dependencies** (what needs to be built first to unblock later tasks).
+3. NUMBERING: Every single step's `content` MUST start with a `#number` indicating its sequence (e.g., "#1 Create DB schema", "#2 Build API route"). 
+4. DO NOT DOUBLE NUMBER: If an existing task already has a `#number` in its text, you MUST remove the old number before adding the new one. (e.g., Change "#4 Setup Database" to "#6 Setup Database", NOT "#6 #4 Setup Database").
+5. IDs: For existing tasks that you keep, you MUST preserve their original `id` and `status`. For entirely new tasks, you do not need to provide an `id` (the system will assign one).
 
-You MUST output an EXACT JSON object with a single "new_tasks" array containing objects:
+You MUST output an EXACT JSON object with a single "todos" array containing the full plan:
 {{
-  "new_tasks": [
-    {{"content": "Implement auth middleware", "priority": "high"}},
-    {{"content": "Setup database schema", "priority": "medium"}}
+  "todos": [
+    {{"id": "1", "content": "#1 Setup database schema", "status": "pending", "priority": "high"}},
+    {{"id": "2", "content": "#2 Implement auth middleware", "status": "pending", "priority": "high"}},
+    {{"content": "#3 Create frontend login view", "status": "pending", "priority": "medium"}}
   ]
 }}
-If no new tasks are needed, return an empty array: {{"new_tasks": []}}
 """
 
     human_msg = f"""
@@ -70,40 +75,31 @@ Design Documents:
 """
 
     try:
-        llm = ChatOpenAI(model="gpt-5-mini", temperature=0.1, model_kwargs={"response_format": {"type": "json_object"}})
+        model_name = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+        llm = ChatOpenAI(model=model_name, temperature=0.1, model_kwargs={"response_format": {"type": "json_object"}})
         
-        _log.info(f"[{session_id}] Generating Todos from {len(docs_content)} chars of docs...")
+        _log.info(f"[{session_id}] Generating Todos from {len(docs_content)} chars of docs using {model_name}...")
         res = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=human_msg)])
         
         data = json.loads(str(res.content))
-        new_tasks = data.get("new_tasks", [])
+        new_todos = data.get("todos", [])
         
-        if not new_tasks:
+        if not new_todos:
             return current_todos
             
-        # Append new tasks with sequential IDs
-        merged_todos = list(current_todos)
-        next_id = highest_id + 1
-        
-        for task in new_tasks:
-            # Simple deduplication check via exact/partial string match
-            task_str = task.get("content", "").lower()
-            if not task_str:
-                continue
-                
-            is_dup = any(task_str in t.get("content", "").lower() or t.get("content", "").lower() in task_str for t in merged_todos)
-            if not is_dup:
-                merged_todos.append({
-                    "id": str(next_id),
-                    "content": task.get("content", f"Task {next_id}"),
-                    "status": "pending",
-                    "priority": task.get("priority", "medium")
-                })
-                next_id += 1
-                
+        # Assign IDs to newly created tasks that lack them
+        final_todos = []
+        for task in new_todos:
+            if "id" not in task or not str(task["id"]).strip():
+                task["id"] = str(highest_id + 1)
+                highest_id += 1
+            if "status" not in task:
+                task["status"] = "pending"
+            final_todos.append(task)
+            
         # Save and return
-        update_todos(session_id, merged_todos)
-        return merged_todos
+        update_todos(session_id, final_todos)
+        return final_todos
         
     except Exception as e:
         _log.error(f"Failed to generate todos: {e}")

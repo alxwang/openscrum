@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from typing import Dict, Any
 
 from langchain_core.messages import AIMessage
@@ -49,12 +50,14 @@ Rules for updating:
 3. Identify the current active 'in_progress' step
 4. You MUST retain the exact 'id' string for existing steps (they may be UUIDs). DO NOT change existing IDs.
 5. Step statuses: pending, in_progress, completed, cancelled
+6. PRIORITY: Always order steps based on strictly required **engineering dependencies** (what needs to be built first to unblock later tasks).
+7. NUMBERING: Every step's `content` must start with a `#number` indicating its sequence (e.g., "#1 Create DB schema", "#2 Build API route"). Update numbers if sequence changes.
 
 You MUST output EXACTLY this JSON format:
 {{
   "todos": [
-    {{"id": "a1b2c3d4", "content": "Step 1 description", "status": "completed", "priority": "high"}},
-    {{"id": "e5f6g7h8", "content": "Step 2 description", "status": "in_progress", "priority": "high"}}
+    {{"id": "a1b2c3d4", "content": "#1 Step 1 description", "status": "completed", "priority": "high"}},
+    {{"id": "e5f6g7h8", "content": "#2 Step 2 description", "status": "in_progress", "priority": "high"}}
   ],
   "status_message": "Brief description of what the agent just accomplished (1-2 sentences)",
   "next_action": "What the agent should do next"
@@ -70,12 +73,11 @@ You MUST output EXACTLY this JSON format:
     recent_msgs = messages[-10:]
     
     try:
-        # The user specifically requested "gpt-5-mini". Fallback to gpt-4o-mini if it fails?
-        # LangChain's ChatOpenAI will just pass the string to the OpenAI API.
-        llm = ChatOpenAI(model="gpt-5-mini", temperature=0.1, model_kwargs={"response_format": {"type": "json_object"}})
+        model_name = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+        llm = ChatOpenAI(model=model_name, temperature=0.1, model_kwargs={"response_format": {"type": "json_object"}})
         chain = prompt | llm
         
-        _log.info("[TodoTracker] Analyzing progress with gpt-5-mini...")
+        _log.info(f"[TodoTracker] Analyzing progress with {model_name}...")
         res = chain.invoke({
             "messages": recent_msgs,
             "current_todos": json.dumps(current_todos, indent=2)

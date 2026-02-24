@@ -138,8 +138,8 @@
     "variables": []
   },
   "BEAST_PROVIDER_SYSTEM": {
-    "path": "prompts/session/prompt/beast.txt",
-    "description": "Provider-specific system prompt for GPT models (GPT-4, GPT-5, o1, o3)",
+    "path": "prompts/agent/edit.md",
+    "description": "Provider-specific system prompt for edit mode",
     "variables": []
   },
   "GEMINI_PROVIDER_SYSTEM": {
@@ -163,7 +163,7 @@
     "variables": []
   },
   "PLAN_MODE_SYSTEM_REMINDER": {
-    "path": "prompts/session/prompt/plan.txt",
+    "path": "prompts/agent/plan.md",
     "description": "System reminder prompt for plan mode (read-only phase)",
     "variables": []
   },
@@ -175,6 +175,11 @@
   "BUILD_SWITCH_SYSTEM_REMINDER": {
     "path": "prompts/session/prompt/build-switch.txt",
     "description": "System reminder prompt for switching from plan to build mode",
+    "variables": []
+  },
+  "PLAN_SWITCH_SYSTEM_REMINDER": {
+    "path": "prompts/session/prompt/plan-switch.txt",
+    "description": "System reminder prompt for switching from build to plan mode",
     "variables": []
   },
   "MAX_STEPS_SYSTEM_REMINDER": {

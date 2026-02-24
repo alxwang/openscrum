@@ -402,6 +402,15 @@
           </div>
         </div>
       </div>
+
+      <!-- Git Review Modal -->
+      <GitReviewModal
+        :isOpen="requiresGitReview"
+        :diffContent="gitDiffContent"
+        :isProcessing="isProcessingGitReview"
+        @accept="handleAcceptGitChanges"
+        @reject="handleRejectGitChanges"
+      />
     </div>
   </div>
 </template>
@@ -421,6 +430,7 @@ import CodeViewer from './components/CodeViewer.vue'
 import TodoList from './components/TodoList.vue'
 import ConsoleViewer from './components/ConsoleViewer.vue'
 import AgentRulesViewer from './components/AgentRulesViewer.vue'
+import GitReviewModal from './components/GitReviewModal.vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
@@ -446,6 +456,9 @@ const {
   fetchTodos,
   updateTodos,
   generateTodos,
+  getGitStatus,
+  commitGitChanges,
+  rejectGitChanges,
   sessionId,
   modelName 
 } = useApiClient()
@@ -561,6 +574,11 @@ const syncRefreshCounter = ref(0)
 // Copy to clipboard tracking
 const copiedMessageIndex = ref(null)
 const copiedMessagePosition = ref({ x: 0, y: 0 })
+
+// Git Review state
+const requiresGitReview = ref(false)
+const gitDiffContent = ref('')
+const isProcessingGitReview = ref(false)
 
 // Display name: prefer session.title from server, fallback to 'Untitled Session'
 const sessionDisplayName = computed(() => {
@@ -1620,7 +1638,95 @@ const handleResetSession = async () => {
   }
 }
 
-// Resizable pane handlers for 3-pane layout
+// ============================================================================
+// Git Integration Handlers
+// ============================================================================
+
+const checkGitStatus = async () => {
+  if (!sessionId.value || mode.value !== 'edit') return false
+  
+  try {
+    console.log('[Git] Checking for uncommitted changes...')
+    const status = await getGitStatus(sessionId.value)
+    if (status && status.has_changes) {
+      console.log('[Git] Detected changes! Opening review modal.')
+      gitDiffContent.value = status.diff
+      requiresGitReview.value = true
+      return true
+    }
+    return false
+  } catch (err) {
+    console.error('[Git] Check failed:', err)
+    return false
+  }
+}
+
+const handleAcceptGitChanges = async () => {
+  isProcessingGitReview.value = true
+  try {
+    const res = await commitGitChanges(sessionId.value)
+    if (res.success) {
+      console.log('[Git] Changes committed:', res.commit_message)
+      // Dismiss modal
+      requiresGitReview.value = false
+      gitDiffContent.value = ''
+      
+      // Post system message
+      messages.value.push({
+        id: `system-${Date.now()}`,
+        role: 'system',
+        content: `[Agent changes committed: ${res.commit_message}]`,
+        timestamp: new Date().toISOString()
+      })
+      await nextTick()
+      scrollToBottom()
+    } else {
+      alert('Failed to commit changes.')
+    }
+  } catch (err) {
+    console.error('[Git] Accept failed:', err)
+    alert('Error accepting changes.')
+  } finally {
+    isProcessingGitReview.value = false
+  }
+}
+
+const handleRejectGitChanges = async () => {
+  isProcessingGitReview.value = true
+  try {
+    const res = await rejectGitChanges(sessionId.value)
+    if (res.success) {
+      console.log('[Git] Changes rejected and hard reset applied.')
+      // Dismiss modal
+      requiresGitReview.value = false
+      gitDiffContent.value = ''
+      
+      // Refresh tree
+      syncRefreshCounter.value++
+      
+      // Post system message
+      messages.value.push({
+        id: `system-${Date.now()}`,
+        role: 'system',
+        content: '[Agent changes rejected. Workspace reset.]',
+        timestamp: new Date().toISOString()
+      })
+      await nextTick()
+      scrollToBottom()
+    } else {
+      alert('Failed to reject changes.')
+    }
+  } catch (err) {
+    console.error('[Git] Reject failed:', err)
+    alert('Error rejecting changes.')
+  } finally {
+    isProcessingGitReview.value = false
+  }
+}
+
+// ============================================================================
+// Layout Resizing Handlers
+// ============================================================================
 // Left divider (between left and center panes)
 const startDraggingLeft = () => {
   isDraggingLeft.value = true
@@ -2281,6 +2387,9 @@ const sendMessage = async () => {
         console.error('Failed to update sync status', e)
       }
     }
+    
+    // Check Git status for review modal
+    await checkGitStatus()
   }
 }
 
@@ -2486,6 +2595,9 @@ const handleSelectSession = async (id) => {
     if (mode.value === 'plan') {
       console.log('[Design] Loading design documents after session select (mode is plan)')
       await fetchDesignDocuments()
+    } else if (mode.value === 'edit') {
+      console.log('[Todos] Loading todos after session select (mode is edit)')
+      await loadTodosForEditMode()
     }
   } catch (error) {
     console.error('Failed to select session:', error)
@@ -2518,6 +2630,9 @@ const handleCreateSession = async (payload) => {
   if (mode.value === 'plan') {
     console.log('[Design] Loading design documents for new session (mode is plan)')
     fetchDesignDocuments()
+  } else if (mode.value === 'edit') {
+    console.log('[Todos] Loading todos for new session (mode is edit)')
+    loadTodosForEditMode()
   }
 
   // Fetch workspace status
@@ -2641,6 +2756,9 @@ const initializeSession = async () => {
           if (mode.value === 'plan') {
             console.log('[Design] Loading design documents on init (mode is plan)')
             await fetchDesignDocuments()
+          } else if (mode.value === 'edit') {
+            console.log('[Todos] Loading todos on init (mode is edit)')
+            await loadTodosForEditMode()
           }
         } catch (error) {
           console.error('Failed to load message history:', error)

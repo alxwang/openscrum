@@ -121,42 +121,6 @@ class PromptRegistry:
         # Render template
         prompt = template.render(**render_context)
         
-        # Append JSON format instructions if requested
-        if force_json:
-            json_instruction = """
-
----
-CRITICAL: You MUST respond in valid JSON format only. All responses must be valid JSON objects.
-
-Response Format:
-- If you need to call tools, use tool_calls in your JSON response
-- If you are providing text content, include it in a "content" field
-- All tool calls must be in the "tool_calls" array with "name" and "arguments" fields
-- Never include any text outside of JSON structure
-- Ensure all JSON is properly escaped and valid
-
-Example JSON response format:
-{
-  "content": "Your text response here",
-  "tool_calls": [
-    {
-      "name": "tool_name",
-      "arguments": {
-        "param1": "value1",
-        "param2": "value2"
-      }
-    }
-  ]
-}
-
-If you have no tool calls, respond with:
-{
-  "content": "Your text response here"
-}
-
-Remember: ALL responses must be valid JSON. No markdown, no plain text, only JSON."""
-            prompt += json_instruction
-        
         return prompt
     
     def list_prompts(self) -> Dict[str, Dict[str, Any]]:

@@ -161,6 +161,16 @@ class Session:
         }
         key = ["session", DEFAULT_PROJECT_ID, sid]
         self._storage.write(key, info)
+        
+        # Initialize Git Repo now that the directory is known
+        try:
+            from server.git_service import GitService
+            git_svc = GitService(workspace_dir)
+            git_svc.init_repo()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to auto-init git repo in {workspace_dir}: {e}")
+            
         return _session_info(info)
 
     def get(self, session_id: str) -> SessionInfo:
@@ -169,6 +179,18 @@ class Session:
             raise ValueError(f"Invalid session id: {session_id}")
         key = ["session", DEFAULT_PROJECT_ID, session_id]
         raw = self._storage.read(key)
+        
+        # Ensure git repo is initialized when loading a session
+        try:
+            workspace_dir = raw.get("directory")
+            if workspace_dir:
+                from server.git_service import GitService
+                git_svc = GitService(workspace_dir)
+                git_svc.init_repo()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to auto-init git repo on load for {session_id}: {e}")
+            
         return _session_info(raw)
 
     def update(

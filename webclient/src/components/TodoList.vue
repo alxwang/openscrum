@@ -171,10 +171,18 @@ defineEmits(['generate', 'delete', 'process'])
 
 const selectedId = ref(null)
 
-// Sort steps by ID correctly (if they are numbers)
+// Sort steps by logically extracted #num prefix, fallback to ID
 const sortedTodos = computed(() => {
   if (!props.todos) return []
   return [...props.todos].sort((a, b) => {
+    const matchA = a.content?.match(/^#(\d+)/)
+    const matchB = b.content?.match(/^#(\d+)/)
+    
+    if (matchA && matchB) {
+      return parseInt(matchA[1]) - parseInt(matchB[1])
+    }
+    
+    // Fallback if numbers aren't found for whatever reason
     const idA = parseInt(a.id)
     const idB = parseInt(b.id)
     if (!isNaN(idA) && !isNaN(idB)) {
