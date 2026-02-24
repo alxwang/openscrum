@@ -53,6 +53,14 @@
             </span>
           </div>
           <div class="flex items-center gap-4">
+            <div
+              v-if="sessionId && tokenUsage.tokenCount > 0"
+              class="px-3 py-1.5 text-xs rounded-lg border font-semibold"
+              :class="tokenUsage.shouldCompress ? 'bg-yellow-900/50 text-yellow-200 border-yellow-600' : 'bg-gray-800 text-gray-100 border-gray-600'"
+              title="Current context token usage"
+            >
+              {{ tokenUsage.usagePercentage }}% • {{ tokenUsage.tokenCount.toLocaleString() }} / {{ tokenUsage.tokenLimit.toLocaleString() }} tokens
+            </div>
             <button
               @click="toggleMode"
               class="px-3 py-1.5 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-white font-semibold border border-gray-600"
@@ -579,6 +587,8 @@ const copiedMessagePosition = ref({ x: 0, y: 0 })
 const requiresGitReview = ref(false)
 const gitDiffContent = ref('')
 const isProcessingGitReview = ref(false)
+const activeTodoExecution = ref(null)
+const pendingTodoReview = ref(null)
 
 // Display name: prefer session.title from server, fallback to 'Untitled Session'
 const sessionDisplayName = computed(() => {
@@ -1324,6 +1334,16 @@ const handleQuestionSkip = () => {
   // Don't send anything, just close the dialog
 }
 
+const normalizeTodosForIdle = (incomingTodos) => {
+  if (!Array.isArray(incomingTodos)) return []
+  return incomingTodos.map(todo => {
+    if (todo?.status === 'in_progress') {
+      return { ...todo, status: 'pending' }
+    }
+    return todo
+  })
+}
+
 const toggleMode = () => {
   const newMode = mode.value === 'plan' ? 'edit' : 'plan'
   mode.value = newMode
@@ -1642,7 +1662,7 @@ const handleResetSession = async () => {
 // Git Integration Handlers
 // ============================================================================
 
-const checkGitStatus = async () => {
+const checkGitStatus = async ({ forceModal = false } = {}) => {
   if (!sessionId.value || mode.value !== 'edit') return false
   
   try {
@@ -1653,6 +1673,10 @@ const checkGitStatus = async () => {
       gitDiffContent.value = status.diff
       requiresGitReview.value = true
       return true
+    }
+    if (forceModal) {
+      requiresGitReview.value = false
+      gitDiffContent.value = ''
     }
     return false
   } catch (err) {
@@ -1666,10 +1690,19 @@ const handleAcceptGitChanges = async () => {
   try {
     const res = await commitGitChanges(sessionId.value)
     if (res.success) {
+      if (pendingTodoReview.value?.id) {
+        const targetId = String(pendingTodoReview.value.id)
+        const todoIndex = todos.value.findIndex(t => String(t.id) === targetId)
+        if (todoIndex !== -1) {
+          todos.value[todoIndex].status = 'completed'
+          await updateTodos(sessionId.value, todos.value)
+        }
+      }
       console.log('[Git] Changes committed:', res.commit_message)
       // Dismiss modal
       requiresGitReview.value = false
       gitDiffContent.value = ''
+      pendingTodoReview.value = null
       
       // Post system message
       messages.value.push({
@@ -1696,10 +1729,19 @@ const handleRejectGitChanges = async () => {
   try {
     const res = await rejectGitChanges(sessionId.value)
     if (res.success) {
+      if (pendingTodoReview.value?.id) {
+        const targetId = String(pendingTodoReview.value.id)
+        const todoIndex = todos.value.findIndex(t => String(t.id) === targetId)
+        if (todoIndex !== -1) {
+          todos.value[todoIndex].status = 'pending'
+          await updateTodos(sessionId.value, todos.value)
+        }
+      }
       console.log('[Git] Changes rejected and hard reset applied.')
       // Dismiss modal
       requiresGitReview.value = false
       gitDiffContent.value = ''
+      pendingTodoReview.value = null
       
       // Refresh tree
       syncRefreshCounter.value++
@@ -1990,19 +2032,20 @@ const handleSaveDesignDoc = async ({ docType, content }) => {
       
       // Refresh file tree to show the updated design doc
       syncRefreshCounter.value++
-
-const handleSaveDesignDocModal = async ({ docType, content }) => {
-  await handleSaveDesignDoc({ docType, content })
-  // Update modal content after saving
-  modalViewerContent.value = content
-}
       console.log('[FileTree] Triggering file tree reload after saving design doc')
+
     } else {
       console.error('[Design] Failed to save document:', await response.text())
     }
   } catch (error) {
     console.error('[Design] Failed to save document:', error)
   }
+}
+
+const handleSaveDesignDocModal = async ({ docType, content }) => {
+  await handleSaveDesignDoc({ docType, content })
+  // Update modal content after saving
+  modalViewerContent.value = content
 }
 
 // Watch for mode changes and session changes
@@ -2016,10 +2059,11 @@ watch([mode, sessionId], async ([newMode, newSessionId]) => {
 const loadTodosForEditMode = async () => {
   if (!sessionId.value) return
   const fetched = await fetchTodos(sessionId.value)
-  todos.value = fetched
-  if (fetched.length === 0) {
-    // Auto-generate if empty
-    handleGenerateTodos()
+  const normalized = normalizeTodosForIdle(fetched)
+  todos.value = normalized
+  // Persist normalization so refresh/load stays consistent
+  if (sessionId.value && JSON.stringify(normalized) !== JSON.stringify(fetched)) {
+    await updateTodos(sessionId.value, normalized)
   }
 }
 
@@ -2043,16 +2087,57 @@ const handleDeleteTodo = async (id) => {
   await updateTodos(sessionId.value, updated)
 }
 
-const handleProcessTodo = (todo) => {
-  if (!todo) return
-  inputMessage.value = `Process Todo #${todo.id}: ${todo.content}`
-  if (inputRef.value) {
-    inputRef.value.focus()
+const sanitizeTodosForSingleExecution = (incomingTodos) => {
+  if (!Array.isArray(incomingTodos)) return []
+  if (!activeTodoExecution.value?.id) return incomingTodos
+  const targetId = String(activeTodoExecution.value.id)
+  return incomingTodos.map(t => {
+    const tid = String(t.id)
+    if (tid === targetId) {
+      // Keep selected task in-progress until user approves the git diff
+      return { ...t, status: 'in_progress' }
+    }
+    if (t.status === 'in_progress') {
+      return { ...t, status: 'pending' }
+    }
+    return t
+  })
+}
+
+const handleProcessTodo = async (todo) => {
+  if (!todo || !sessionId.value) return
+  if (isSending.value || requiresGitReview.value || isProcessingGitReview.value) return
+
+  const targetId = String(todo.id)
+  activeTodoExecution.value = {
+    id: targetId,
+    content: todo.content || '',
   }
+
+  const updatedTodos = (todos.value || []).map(t => {
+    const tid = String(t.id)
+    if (tid === targetId) return { ...t, status: 'in_progress' }
+    if (t.status === 'in_progress') return { ...t, status: 'pending' }
+    return t
+  })
+  todos.value = updatedTodos
+  await updateTodos(sessionId.value, updatedTodos)
+
+  inputMessage.value = `Process Todo #${targetId}: ${todo.content}
+
+CRITICAL EXECUTION CONSTRAINTS:
+1) Work ONLY on this todo item (#${targetId}).
+2) Do NOT start or execute any other todo item.
+3) When this item is complete, stop immediately and return control.`
+  await sendMessage()
 }
 
 const sendMessage = async () => {
   if (!inputMessage.value.trim() || isSending.value || !sessionId.value) return
+  if (requiresGitReview.value) {
+    console.warn('Git review is pending. Accept or reject changes before continuing.')
+    return
+  }
 
   const userMessage = inputMessage.value.trim()
   inputMessage.value = ''
@@ -2232,11 +2317,12 @@ const sendMessage = async () => {
           if (chunk.progress) {
             latestProgress.value = chunk.progress
             if (chunk.progress.todos) {
-              todos.value = chunk.progress.todos
+              const nextTodos = sanitizeTodosForSingleExecution(chunk.progress.todos)
+              todos.value = nextTodos
               // Persist the tracker's updated tasks to the backend
               if (sessionId.value && mode.value === 'edit') {
                 console.log('[Progress] Saving updated todos to backend database')
-                await updateTodos(sessionId.value, chunk.progress.todos)
+                await updateTodos(sessionId.value, nextTodos)
               }
             }
           }
@@ -2272,11 +2358,12 @@ const sendMessage = async () => {
               console.log('[Progress] Found progress data, storing in center pane')
               latestProgress.value = progressData
               if (progressData.todos) {
-                todos.value = progressData.todos
+                const nextTodos = sanitizeTodosForSingleExecution(progressData.todos)
+                todos.value = nextTodos
                 // Persist the tracker's updated tasks to the database so they survive refresh
                 if (sessionId.value && mode.value === 'edit') {
                   console.log('[Progress] Saving updated todos to backend database')
-                  await updateTodos(sessionId.value, progressData.todos)
+                  await updateTodos(sessionId.value, nextTodos)
                 }
               }
             }
@@ -2358,20 +2445,9 @@ const sendMessage = async () => {
       content: `**Error:** ${error.message}`,
     })
   } finally {
-    // Proactively mark Todo as completed if this was a direct task execution
-    if (mode.value === 'edit' && userMessage.startsWith('Process Todo #')) {
-      const match = userMessage.match(/^Process Todo #([^:]+):/);
-      if (match && match[1]) {
-        const targetId = match[1];
-        const todoIndex = todos.value.findIndex(t => String(t.id) === targetId);
-        if (todoIndex !== -1 && todos.value[todoIndex].status !== 'completed') {
-          console.log(`[Task Completion] Optimistically marking task #${targetId} as completed`);
-          todos.value[todoIndex].status = 'completed';
-          if (sessionId.value) {
-            await updateTodos(sessionId.value, todos.value);
-          }
-        }
-      }
+    if (activeTodoExecution.value?.id) {
+      pendingTodoReview.value = { ...activeTodoExecution.value }
+      activeTodoExecution.value = null
     }
 
     isSending.value = false
@@ -2389,7 +2465,22 @@ const sendMessage = async () => {
     }
     
     // Check Git status for review modal
-    await checkGitStatus()
+    const requiresReview = await checkGitStatus({ forceModal: !!pendingTodoReview.value })
+    if (pendingTodoReview.value && !requiresReview) {
+      const targetId = String(pendingTodoReview.value.id)
+      const todoIndex = todos.value.findIndex(t => String(t.id) === targetId)
+      if (todoIndex !== -1) {
+        todos.value[todoIndex].status = 'pending'
+        await updateTodos(sessionId.value, todos.value)
+      }
+      messages.value.push({
+        id: `system-${Date.now()}`,
+        role: 'system',
+        content: `[No git diff detected for Todo #${targetId}. Task reset to pending.]`,
+        timestamp: new Date().toISOString()
+      })
+      pendingTodoReview.value = null
+    }
   }
 }
 

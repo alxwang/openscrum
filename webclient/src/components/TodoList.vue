@@ -58,7 +58,7 @@
         <!-- Task List Items -->
         <div class="divide-y divide-surface-dark">
           <div 
-            v-for="todo in sortedTodos" 
+            v-for="(todo, index) in sortedTodos" 
             :key="todo.id"
             class="px-4 py-3 transition-colors duration-200 cursor-pointer relative group"
             :class="[
@@ -96,7 +96,7 @@
                       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                   </div>
-                  <span v-else class="text-[10px] font-medium text-text-muted">{{ todo.id }}</span>
+                  <span v-else class="text-[9px] font-medium text-text-muted overflow-hidden whitespace-nowrap">{{ getStepBadgeText(todo, index) }}</span>
                 </div>
               </div>
               
@@ -227,5 +227,11 @@ const getIconContainerClass = (todo) => {
   if (todo.status === 'in_progress') return 'border-accent bg-accent/20'
   if (todo.status === 'completed') return 'border-green-600 bg-green-600'
   return 'border-surface-dark bg-surface-dark/50'
+}
+
+const getStepBadgeText = (todo, index) => {
+  const match = todo?.content?.match(/^#(\d+)/)
+  if (match && match[1]) return match[1]
+  return String(index + 1)
 }
 </script>

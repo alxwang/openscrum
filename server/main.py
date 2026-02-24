@@ -11,6 +11,7 @@ import os
 import json
 import time
 import shutil
+import re
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, Optional
 
@@ -35,7 +36,7 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -827,6 +828,23 @@ if SESSION_AVAILABLE:
     
     # Initialize workspace root on startup
     workspace_mgr = get_workspace_manager()
+
+    def _workspace_path_for_session(session: dict) -> Path:
+        """Resolve canonical workspace path from persisted session metadata."""
+        directory = session.get("directory")
+        if directory:
+            return Path(directory)
+        # Backward compatibility fallback for older session records
+        session_id = session.get("id", "")
+        workspace_name = session.get("workspace_name", f"session_{session_id}")
+        return Path(get_workspace_root()) / workspace_name
+
+    def _ensure_within_workspace(workspace_root_path: Path, target_path: Path) -> None:
+        """Reject path traversal outside workspace root."""
+        try:
+            target_path.resolve().relative_to(workspace_root_path.resolve())
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access denied")
     
     @app.get("/sessions", summary="List sessions")
     async def list_sessions(
@@ -858,15 +876,11 @@ if SESSION_AVAILABLE:
         
         # Filter to only sessions with existing workspaces if required
         if require_workspace:
-            workspace_root = get_workspace_root()
             filtered_sessions = []
             for session in sessions:
-                session_id = session.get("id")
-                if session_id:
-                    # Check if workspace directory exists
-                    workspace_path = workspace_root / f"session_{session_id}"
-                    if workspace_path.exists() and workspace_path.is_dir():
-                        filtered_sessions.append(session)
+                workspace_path = _workspace_path_for_session(session)
+                if workspace_path.exists() and workspace_path.is_dir():
+                    filtered_sessions.append(session)
             sessions = filtered_sessions
         
         # Apply limit after filtering
@@ -981,8 +995,7 @@ if SESSION_AVAILABLE:
             
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            workspace_root_path = _workspace_path_for_session(session)
             
             set_tool_context(session_id, str(workspace_root_path), [])
             try:
@@ -1002,8 +1015,7 @@ if SESSION_AVAILABLE:
             
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            workspace_root_path = _workspace_path_for_session(session)
             
             set_tool_context(session_id, str(workspace_root_path), [])
             try:
@@ -1025,8 +1037,7 @@ if SESSION_AVAILABLE:
             
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            workspace_root_path = _workspace_path_for_session(session)
             
             set_tool_context(session_id, str(workspace_root_path), [])
             try:
@@ -1064,8 +1075,7 @@ if SESSION_AVAILABLE:
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            workspace_root_path = _workspace_path_for_session(session)
             
             if not workspace_root_path.exists():
                 return {"name": "root", "type": "directory", "children": []}
@@ -1102,16 +1112,14 @@ if SESSION_AVAILABLE:
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            workspace_root_path = _workspace_path_for_session(session)
             
             # Resolve the requested path against the workspace root
             # using resolve() and carefully checking if it's still inside root
             requested_path = (workspace_root_path / path).resolve()
             
             # Prevent directory traversal attacks
-            if not str(requested_path).startswith(str(workspace_root_path.resolve())):
-                raise HTTPException(status_code=403, detail="Access denied")
+            _ensure_within_workspace(workspace_root_path, requested_path)
                 
             if not requested_path.exists() or not requested_path.is_file():
                 raise HTTPException(status_code=404, detail="File not found")
@@ -1130,8 +1138,7 @@ if SESSION_AVAILABLE:
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = Path(get_workspace_root()) / workspace_name
+            workspace_root_path = _workspace_path_for_session(session)
             
             if not workspace_root_path.exists():
                 raise HTTPException(status_code=404, detail="Workspace does not exist")
@@ -1140,8 +1147,7 @@ if SESSION_AVAILABLE:
             target_path = (workspace_root_path / request.path).resolve()
             
             # Ensure the path is within the workspace
-            if not str(target_path).startswith(str(workspace_root_path.resolve())):
-                raise HTTPException(status_code=403, detail="Path is outside workspace")
+            _ensure_within_workspace(workspace_root_path, target_path)
                 
             # Create parent directories if they don't exist
             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1180,21 +1186,27 @@ if SESSION_AVAILABLE:
         return get_todos(session_id)
 
     @app.put("/sessions/{session_id}/todo", summary="Update session todo list")
-    async def session_todo_put(session_id: str, todos: list):
+    async def session_todo_put(session_id: str, todos: Any = Body(default_factory=list)):
         try:
             from server.storage import update_todos
         except ImportError:
             from storage import update_todos
-        update_todos(session_id, todos)
-        return todos
+        safe_todos = todos if isinstance(todos, list) else []
+        if not isinstance(todos, list):
+            logging.getLogger(__name__).warning(
+                "session_todo_put received non-list payload for %s; coercing to [] (type=%s)",
+                session_id,
+                type(todos).__name__,
+            )
+        update_todos(session_id, safe_todos)
+        return safe_todos
         
     @app.post("/sessions/{session_id}/todo/generate", summary="Auto-generate todo list from context")
     def session_todo_generate(session_id: str):
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            workspace_root_path = str(_workspace_path_for_session(session))
             
             try:
                 from server.agent.todo_generator import generate_todos_for_session
@@ -1213,8 +1225,7 @@ if SESSION_AVAILABLE:
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            workspace_root_path = str(_workspace_path_for_session(session))
             
             try:
                 from server.git_service import GitService
@@ -1231,8 +1242,7 @@ if SESSION_AVAILABLE:
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            workspace_root_path = str(_workspace_path_for_session(session))
             
             try:
                 from server.git_service import GitService
@@ -1275,8 +1285,7 @@ if SESSION_AVAILABLE:
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
-            workspace_name = session.get("workspace_name", f"session_{session_id}")
-            workspace_root_path = str(Path(get_workspace_root()) / workspace_name)
+            workspace_root_path = str(_workspace_path_for_session(session))
             
             try:
                 from server.git_service import GitService
@@ -1723,12 +1732,13 @@ if SESSION_AVAILABLE:
                     
                     # Perform compression similar to /compress endpoint
                     if len(previous_messages) > 5:
-                        recent_messages = previous_messages[:5]  # Already newest first
-                        old_messages = previous_messages[5:]
+                        # previous_messages is chronological here; keep the most recent 5
+                        recent_messages = previous_messages[-5:]
+                        old_messages = previous_messages[:-5]
                         
                         # Create summary
                         summary_parts = []
-                        for msg in reversed(old_messages):  # Chronological order
+                        for msg in old_messages:
                             info = msg.get("info", {})
                             role = info.get("role", "unknown")
                             parts = msg.get("parts", [])
@@ -1885,10 +1895,16 @@ if SESSION_AVAILABLE:
                     raise HTTPException(status_code=503, detail=str(e))
 
                 run_mode = "edit" if is_init_command else request.mode
+                single_todo_id: str | None = None
+                if isinstance(request.message, str):
+                    m = re.match(r"\s*Process Todo #([^:]+):", request.message)
+                    if m:
+                        single_todo_id = m.group(1).strip()
+                scratchpad = f"[SINGLE_TODO_ID={single_todo_id}]" if single_todo_id else ""
                 initial_state: AgentState = {
                     "messages": langchain_messages,
                     "mode": run_mode,
-                    "scratchpad": "",
+                    "scratchpad": scratchpad,
                 }
 
                 # 8. Stream response and save assistant message (with permission context)

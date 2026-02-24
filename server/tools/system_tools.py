@@ -457,6 +457,19 @@ def bash(
         
         # Detect background commands (trailing '&') and handle specially
         cmd_str = command.strip()
+        
+        # Idempotent safeguard: avoid noisy "Reinitialized existing Git repository ..."
+        # when the workspace is already a git repository.
+        if re.fullmatch(r"git\s+init(?:\s+.*)?", cmd_str):
+            probe = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(cmd_dir),
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0 and probe.stdout.strip().lower() == "true":
+                return "Skipped: Git repository already initialized in this workspace."
+
         is_background = cmd_str.endswith("&")
         if is_background:
             # Strip trailing '&' and any trailing whitespace
@@ -2015,4 +2028,3 @@ __all__ = [
     'generate_design_from_code',
     'generate_gap_analysis',
 ]
-

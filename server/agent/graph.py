@@ -787,7 +787,51 @@ def create_agent_graph(
         return "planner" if mode == "plan" else "todo_tracker"
     
     workflow.add_conditional_edges("tools", route_from_tools, {"planner": "planner", "todo_tracker": "todo_tracker"})
-    workflow.add_edge("todo_tracker", "editor")
+    
+    def route_from_todo_tracker(state: AgentState) -> Literal["editor", END]:
+        """
+        In single-todo runs (triggered by "Process Todo #X"), stop once that todo is completed.
+        This prevents the agent from auto-executing the next todo without an explicit user click.
+        """
+        scratchpad = state.get("scratchpad", "") or ""
+        marker = "SINGLE_TODO_ID="
+        if marker not in scratchpad:
+            return "editor"
+        # Extract target todo id from scratchpad marker like: [SINGLE_TODO_ID=2]
+        try:
+            start = scratchpad.index(marker) + len(marker)
+            end = scratchpad.find("]", start)
+            target_id = scratchpad[start:end] if end != -1 else scratchpad[start:]
+            target_id = target_id.strip()
+        except Exception:
+            return "editor"
+        if not target_id:
+            return "editor"
+
+        messages = state.get("messages") or []
+        if not messages:
+            return "editor"
+        last = messages[-1]
+        if not isinstance(last, AIMessage):
+            return "editor"
+        try:
+            data = json.loads(str(last.content))
+        except Exception:
+            return "editor"
+        todos = data.get("todos") if isinstance(data, dict) else None
+        if not isinstance(todos, list):
+            return "editor"
+
+        target_completed = False
+        for t in todos:
+            if str(t.get("id")) == target_id and str(t.get("status", "")).lower() == "completed":
+                target_completed = True
+                break
+        if target_completed:
+            return END
+        return "editor"
+
+    workflow.add_conditional_edges("todo_tracker", route_from_todo_tracker, {"editor": "editor", END: END})
     
     return workflow.compile()
 

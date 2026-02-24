@@ -392,12 +392,15 @@ export function useApiClient() {
   }
 
   const updateTodos = async (id, todos) => {
+    const safeTodos = Array.isArray(todos) ? todos : []
     try {
-      const response = await client.put(`/sessions/${id}/todo`, todos)
+      const response = await client.put(`/sessions/${id}/todo`, safeTodos, {
+        headers: { 'Content-Type': 'application/json' },
+      })
       return response.data || []
     } catch (error) {
       console.error('Failed to update todos:', error)
-      return todos // Return old on failure?
+      return safeTodos // Return input fallback on failure
     }
   }
 

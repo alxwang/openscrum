@@ -3,13 +3,56 @@ import logging
 import os
 from typing import Dict, Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from .graph import AgentState
 
 _log = logging.getLogger(__name__)
+
+
+def _render_recent_activity(messages: list, limit: int = 20) -> str:
+    """
+    Convert recent LangChain messages into plain text lines.
+    This avoids sending raw tool-role messages that may violate OpenAI
+    chat sequencing requirements when a sliced window is used.
+    """
+    lines: list[str] = []
+    for msg in messages[-limit:]:
+        role = getattr(msg, "type", msg.__class__.__name__).lower()
+        content = str(getattr(msg, "content", "") or "").strip()
+
+        if role == "human":
+            lines.append(f"user: {content}")
+            continue
+
+        if role == "ai":
+            tool_calls = getattr(msg, "tool_calls", None) or []
+            if tool_calls:
+                names = []
+                for tc in tool_calls:
+                    if isinstance(tc, dict):
+                        names.append(str(tc.get("name", "unknown")))
+                    else:
+                        names.append(str(getattr(tc, "name", "unknown")))
+                lines.append(f"assistant tool_calls: {', '.join(names)}")
+            if content:
+                lines.append(f"assistant: {content}")
+            continue
+
+        if role == "tool":
+            call_id = getattr(msg, "tool_call_id", "")
+            if call_id:
+                lines.append(f"tool[{call_id}]: {content}")
+            else:
+                lines.append(f"tool: {content}")
+            continue
+
+        if content:
+            lines.append(f"{role}: {content}")
+
+    # Keep context compact to reduce tracker cost/latency
+    return "\n".join(lines)[-12000:]
 
 def todo_tracker_node(state: AgentState) -> Dict[str, Any]:
     """
@@ -64,24 +107,18 @@ You MUST output EXACTLY this JSON format:
 }}
 """
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", sys_prompt),
-        MessagesPlaceholder(variable_name="messages")
-    ])
-    
-    # We only want to send the last 10 messages to keep context small and fast
-    recent_msgs = messages[-10:]
+    recent_activity = _render_recent_activity(messages, limit=20)
     
     try:
         model_name = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
         llm = ChatOpenAI(model=model_name, temperature=0.1, model_kwargs={"response_format": {"type": "json_object"}})
-        chain = prompt | llm
-        
         _log.info(f"[TodoTracker] Analyzing progress with {model_name}...")
-        res = chain.invoke({
-            "messages": recent_msgs,
-            "current_todos": json.dumps(current_todos, indent=2)
-        })
+        rendered_system = sys_prompt.format(current_todos=json.dumps(current_todos, indent=2))
+        rendered_human = f"Recent conversation activity:\n{recent_activity}"
+        res = llm.invoke([
+            SystemMessage(content=rendered_system),
+            HumanMessage(content=rendered_human),
+        ])
         
         data = json.loads(str(res.content))
         new_todos = data.get("todos", current_todos)
