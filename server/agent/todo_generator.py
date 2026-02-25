@@ -35,6 +35,7 @@ def generate_todos_for_session(session_id: str, workspace_root: str) -> List[Dic
             
     # Read design docs
     docs_content = ""
+    has_design_docs = False
     if workspace_root:
         root_path = Path(workspace_root)
         design_path = root_path / ".openscrum" / "design"
@@ -42,9 +43,16 @@ def generate_todos_for_session(session_id: str, workspace_root: str) -> List[Dic
             for md_file in design_path.glob("*.md"):
                 try:
                     content = md_file.read_text(encoding="utf-8")
-                    docs_content += f"\n--- {md_file.name} ---\n{content}\n"
+                    if content.strip():
+                        has_design_docs = True
+                        docs_content += f"\n--- {md_file.name} ---\n{content}\n"
                 except Exception as e:
                     _log.warning(f"Could not read {md_file.name} for todo generation: {e}")
+
+    # Strict guardrail: do not generate todos when no design docs exist.
+    if not has_design_docs:
+        _log.info(f"[{session_id}] Skipping todo generation: no design docs found")
+        return current_todos
                     
     sys_prompt = """You are an expert Technical Project Manager.
 Your goal is to analyze the project's Design Documents and the Current Todo List, and output a SINGLE, Comprehensive, properly merged Todo List.
@@ -71,7 +79,7 @@ Current Todo List:
 {json.dumps(current_todos, indent=2)}
 
 Design Documents:
-{docs_content if docs_content.strip() else "No design documents found."}
+{docs_content}
 """
 
     try:
@@ -97,9 +105,9 @@ Design Documents:
                 task["status"] = "pending"
             final_todos.append(task)
             
-        # Save and return
-        update_todos(session_id, final_todos)
-        return final_todos
+        # Save and return the sanitized implementation-focused todo list
+        saved_todos = update_todos(session_id, final_todos)
+        return saved_todos
         
     except Exception as e:
         _log.error(f"Failed to generate todos: {e}")

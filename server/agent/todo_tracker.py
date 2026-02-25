@@ -125,8 +125,8 @@ You MUST output EXACTLY this JSON format:
         status_msg = data.get("status_message", "Executing tasks...")
         next_action = data.get("next_action", "Continuing to next step...")
         
-        # 1. Save to backend database
-        update_todos(session_id, new_todos)
+        # 1. Save to backend database (sanitized to implementation-focused tasks)
+        new_todos = update_todos(session_id, new_todos)
             
         # 2. Format JSON exactly as frontend App.vue expects
         active_step_id = "1"

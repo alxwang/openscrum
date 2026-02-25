@@ -15,6 +15,8 @@ Documents are stored as markdown files in the session workspace.
 
 import os
 import json
+import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -424,31 +426,74 @@ class DesignDocumentManager:
         if current_content is None:
             current_content = ""
         
-        # Simple section replacement (can be enhanced)
-        # Look for ## Section or # Section
+        log = logging.getLogger(__name__)
+        doc_path = self.get_doc_path(doc_type)
         lines = current_content.split('\n')
-        new_lines = []
-        in_section = False
-        section_found = False
-        
-        for line in lines:
-            if line.startswith('#') and section.lower() in line.lower():
-                in_section = True
-                section_found = True
-                new_lines.append(line)
-                new_lines.append(content)
-            elif in_section and line.startswith('#'):
-                in_section = False
-                new_lines.append(line)
-            elif not in_section:
-                new_lines.append(line)
-        
-        # If section wasn't found, append it
-        if not section_found:
-            new_lines.append(f"\n## {section}")
+
+        def _normalize_heading(text: str) -> str:
+            # Normalize markdown heading text for exact, resilient matching.
+            normalized = text.strip().lower()
+            normalized = re.sub(r'[*_`]+', '', normalized)
+            normalized = re.sub(r'\s+', ' ', normalized)
+            return normalized
+
+        target_heading = _normalize_heading(section)
+        heading_re = re.compile(r'^\s{0,3}(#{1,6})\s+(.*?)\s*$')
+
+        start_idx = -1
+        start_level = 0
+        matched_heading_raw = ""
+        candidate_headings: list[str] = []
+
+        for idx, line in enumerate(lines):
+            m = heading_re.match(line)
+            if not m:
+                continue
+            level = len(m.group(1))
+            heading_text_raw = m.group(2).strip()
+            heading_text = _normalize_heading(heading_text_raw)
+            candidate_headings.append(heading_text_raw)
+            if heading_text == target_heading:
+                start_idx = idx
+                start_level = level
+                matched_heading_raw = heading_text_raw
+                break
+
+        before_len = len(current_content)
+        if start_idx >= 0:
+            # Replace until next heading of same/higher level.
+            end_idx = len(lines)
+            for idx in range(start_idx + 1, len(lines)):
+                m = heading_re.match(lines[idx])
+                if m and len(m.group(1)) <= start_level:
+                    end_idx = idx
+                    break
+
+            replacement = [lines[start_idx], content]
+            new_lines = lines[:start_idx] + replacement + lines[end_idx:]
+            log.info(
+                "[DesignDocumentManager.update_section] doc=%s path=%s section=%r matched_heading=%r level=%s replace_range=[%s,%s)",
+                doc_type, doc_path, section, matched_heading_raw, start_level, start_idx, end_idx,
+            )
+        else:
+            # If exact heading wasn't found, append a new section.
+            new_lines = list(lines)
+            if new_lines and new_lines[-1].strip() != "":
+                new_lines.append("")
+            new_lines.append(f"## {section}")
             new_lines.append(content)
-        
+            log.warning(
+                "[DesignDocumentManager.update_section] doc=%s path=%s section=%r heading_not_found; appended_new_section. candidates=%s",
+                doc_type, doc_path, section, candidate_headings[:20],
+            )
+
         updated_content = '\n'.join(new_lines)
+        after_len = len(updated_content)
+        if before_len == after_len and current_content == updated_content:
+            log.warning(
+                "[DesignDocumentManager.update_section] doc=%s path=%s section=%r no_content_change",
+                doc_type, doc_path, section,
+            )
         self.write_document(doc_type, updated_content)
         
         return updated_content

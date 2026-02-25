@@ -51,6 +51,7 @@ from server.token_counter import (
     get_token_limit,
     should_compress,
 )
+from server.design_docs import DesignDocumentManager
 
 # Configure logging so our permission/tool logs are visible when running uvicorn
 logging.basicConfig(
@@ -208,6 +209,133 @@ def _normalize_tool_args(raw: Any) -> dict:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _detect_large_edit_request(message: str) -> tuple[bool, str]:
+    """
+    Heuristic guardrail for edit mode.
+    Returns (is_large_change, reason).
+    """
+    if not message or not message.strip():
+        return False, ""
+    lower = message.strip().lower()
+
+    explicit_patterns = [
+        r"\brewrite (the )?(entire|whole|full)\b",
+        r"\brefactor (the )?(entire|whole|full)\b",
+        r"\bmigrate\b.*\bframework\b",
+        r"\bfrom scratch\b",
+        r"\bstart over\b",
+        r"\bcomplete redesign\b",
+        r"\boverhaul\b",
+        r"\brebuild\b.*\b(all|everything|entire)\b",
+        r"\bchange (the )?architecture\b",
+        r"\breplace (the )?stack\b",
+    ]
+    for pattern in explicit_patterns:
+        if re.search(pattern, lower):
+            return True, f"matched:{pattern}"
+
+    # Broader scope signals.
+    scope_hits = 0
+    scope_terms = [
+        "entire codebase",
+        "whole codebase",
+        "all files",
+        "every file",
+        "all modules",
+        "full system",
+        "end-to-end rewrite",
+    ]
+    for term in scope_terms:
+        if term in lower:
+            scope_hits += 1
+
+    if len(message) > 1200:
+        scope_hits += 1
+    if lower.count(" and ") >= 8:
+        scope_hits += 1
+
+    if scope_hits >= 2:
+        return True, f"scope_hits:{scope_hits}"
+    return False, ""
+
+
+def _load_design_docs_context(workspace_root: str, max_per_doc_chars: int = 3500) -> str | None:
+    """
+    Load current design docs as authoritative context for edit mode.
+    """
+    try:
+        mgr = DesignDocumentManager(workspace_root)
+        docs = mgr.get_all_documents()
+        existing = []
+        for doc_type, payload in docs.items():
+            if payload.get("exists") and payload.get("content"):
+                content = str(payload["content"])[:max_per_doc_chars]
+                existing.append(f"## {doc_type}\n{content}")
+        if not existing:
+            return None
+        return (
+            "AUTHORITATIVE DESIGN DOCUMENTS (SOURCE OF TRUTH FOR EDIT MODE)\n"
+            "Use these docs over memory or assumptions. If code changes, keep docs synchronized.\n\n"
+            + "\n\n".join(existing)
+        )
+    except Exception:
+        return None
+
+
+def _auto_sync_design_docs_from_code(session_id: str, workspace_root: str) -> dict[str, Any]:
+    """
+    Deterministically refresh design docs from current code scan outputs.
+    Runs after a successful edit-mode commit to keep docs aligned with code.
+    """
+    try:
+        from server.tools.system_tools import (
+            scan_codebase,
+            extract_api_routes,
+            extract_db_schemas,
+            list_components,
+            list_services,
+        )
+        from server.tools.context import set_tool_context, clear_tool_context
+    except ImportError:
+        return {"success": False, "message": "sync_tools_unavailable"}
+
+    now = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    set_tool_context(session_id, workspace_root, [])
+    try:
+        overview = scan_codebase.invoke({})
+        api_routes = extract_api_routes.invoke({})
+        db_schemas = extract_db_schemas.invoke({})
+        components = list_components.invoke({})
+        services = list_services.invoke({})
+    finally:
+        clear_tool_context()
+
+    mgr = DesignDocumentManager(workspace_root)
+    doc_payloads: dict[str, str] = {
+        "functionalities": f"# Functionalities\n\n## Source\nAuto-synced from code on {now}.\n\n## Observed Features\n{overview}\n\n## Components\n{components}\n\n## Services\n{services}\n",
+        "tech_stack": f"# Tech Stack\n\n## Source\nAuto-synced from code on {now}.\n\n## Inferred Stack\n{overview}\n",
+        "database_design": f"# Database Design\n\n## Source\nAuto-synced from code on {now}.\n\n## Observed Schemas\n{db_schemas}\n",
+        "user_flow": f"# User Flow Design\n\n## Source\nAuto-synced from code on {now}.\n\n## Inferred from Components and Services\n{components}\n\n{services}\n",
+        "architecture": f"# Architecture\n\n## Source\nAuto-synced from code on {now}.\n\n## System Overview\n{overview}\n\n## Components\n{components}\n\n## Services\n{services}\n",
+        "api_design": f"# API Design\n\n## Source\nAuto-synced from code on {now}.\n\n## Observed Routes\n{api_routes}\n",
+        "requirements": f"# Requirements\n\n## Source\nAuto-synced from code on {now}.\n\n## Implementation-Derived Requirements\n{overview}\n",
+    }
+
+    written_docs: list[str] = []
+    for doc_type, content in doc_payloads.items():
+        try:
+            mgr.write_document(doc_type, content)
+            written_docs.append(doc_type)
+        except Exception:
+            continue
+
+    return {
+        "success": len(written_docs) > 0,
+        "written_docs": written_docs,
+        "timestamp": now,
+    }
 
 
 # ============================================================================
@@ -969,11 +1097,15 @@ if SESSION_AVAILABLE:
     async def update_session(session_id: str, request: UpdateSessionRequest):
         print(f"PATCH SESSION {session_id} - request: {request}", flush=True)
         session_svc = get_session()
+        if request.mode is not None:
+            mode_value = str(request.mode).strip().lower()
+            if mode_value not in {"plan", "edit"}:
+                raise HTTPException(status_code=400, detail="mode must be either 'plan' or 'edit'")
         def editor(d):
             if request.title is not None:
                 d["title"] = request.title
             if request.mode is not None:
-                d["mode"] = request.mode
+                d["mode"] = str(request.mode).strip().lower()
         return session_svc.update(session_id, editor, touch=False)
 
     @app.delete("/sessions/{session_id}", summary="Delete session")
@@ -1198,14 +1330,20 @@ if SESSION_AVAILABLE:
                 session_id,
                 type(todos).__name__,
             )
-        update_todos(session_id, safe_todos)
-        return safe_todos
+        saved_todos = update_todos(session_id, safe_todos)
+        return saved_todos
         
     @app.post("/sessions/{session_id}/todo/generate", summary="Auto-generate todo list from context")
     def session_todo_generate(session_id: str):
         try:
             session_svc = get_session()
             session = session_svc.get(session_id)
+            session_mode = str(session.get("mode", "plan")).strip().lower()
+            if session_mode != "edit":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Todo generation is only allowed in edit mode."
+                )
             workspace_root_path = str(_workspace_path_for_session(session))
             
             try:
@@ -1215,6 +1353,8 @@ if SESSION_AVAILABLE:
                 
             merged_todos = generate_todos_for_session(session_id, workspace_root_path)
             return merged_todos
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
             
@@ -1275,7 +1415,11 @@ if SESSION_AVAILABLE:
                 commit_msg = "Auto-commit from OpenScrum agent"
                 
             success = git_svc.commit_changes(commit_msg)
-            return {"success": success, "commit_message": commit_msg}
+            docs_sync: dict[str, Any] | None = None
+            if success:
+                # Keep docs synchronized automatically after accepted edit commits.
+                docs_sync = _auto_sync_design_docs_from_code(session_id, workspace_root_path)
+            return {"success": success, "commit_message": commit_msg, "docs_sync": docs_sync}
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -1695,11 +1839,37 @@ if SESSION_AVAILABLE:
             try:
                 # 4. Load previous messages (session returns newest first; agent needs chronological order)
                 previous_messages = list(reversed(session_svc.messages(session_id=session_id)))
+                session_mode = str(session.get("mode", "plan")).strip().lower()
                 
                 # 5. Resolve message (e.g. /init -> init command prompt)
                 workspace_root = session["directory"]
                 is_init_command = (request.command or "").strip().lower() == "init"
                 message_text = get_init_prompt(workspace_root) if is_init_command else request.message
+
+                # Guardrail: in edit mode, reject large-scope change requests and ask user to switch to plan mode.
+                if not is_init_command and session_mode == "edit":
+                    is_large, reason = _detect_large_edit_request(message_text or "")
+                    if is_large:
+                        _log.info("Rejected large edit request for session %s (%s)", session_id, reason)
+
+                        async def large_change_stream():
+                            guidance = (
+                                "This request looks too large for EDIT mode.\n\n"
+                                "Please switch to PLAN mode first, update design docs, then return to EDIT mode for implementation.\n"
+                                "Mode transitions are user-controlled.\n"
+                            )
+                            yield _sse_chunk("token", content=guidance)
+                            yield _sse_chunk("done", content=guidance)
+
+                        return StreamingResponse(
+                            large_change_stream(),
+                            media_type="text/event-stream",
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "Connection": "keep-alive",
+                                "X-Accel-Buffering": "no",
+                            },
+                        )
                 
                 # Create user message
                 user_message_id = ascending("message")
@@ -1797,7 +1967,7 @@ if SESSION_AVAILABLE:
                 storage_backend = os.getenv('OPENSCRUM_STORAGE_BACKEND')
                 _log.info(f"Memory check: has_search={has_search}, has_enabled={has_enabled}, is_enabled={is_enabled}, backend={storage_backend}, storage_type={type(storage).__name__}")
                 
-                if has_search and has_enabled and is_enabled:
+                if has_search and has_enabled and is_enabled and session_mode != "edit":
                     try:
                         # Search for memories relevant to original user question (not substituted command prompts)
                         # Configurable minimum relevance threshold (default 0.3)
@@ -1836,7 +2006,14 @@ if SESSION_AVAILABLE:
                     elif not is_enabled:
                         _log.info(f"Memory search disabled: _memsearch_enabled=False (set OPENSCRUM_STORAGE_BACKEND=memsearch in ~/.env)")
                 
-                # Add memory context as system message if found
+                # In edit mode, design docs are authoritative context.
+                if session_mode == "edit":
+                    docs_context = _load_design_docs_context(workspace_root)
+                    if docs_context:
+                        from langchain_core.messages import SystemMessage
+                        langchain_messages.insert(0, SystemMessage(content=docs_context))
+
+                # Add memory context as system message if found (plan mode only)
                 if memory_context:
                     from langchain_core.messages import SystemMessage
                     # Insert system message with memories at the beginning
@@ -1894,7 +2071,8 @@ if SESSION_AVAILABLE:
                         )
                     raise HTTPException(status_code=503, detail=str(e))
 
-                run_mode = "edit" if is_init_command else request.mode
+                # Mode is controlled by the persisted session state (user toggles mode via session update).
+                run_mode = "edit" if is_init_command else session_mode
                 single_todo_id: str | None = None
                 if isinstance(request.message, str):
                     m = re.match(r"\s*Process Todo #([^:]+):", request.message)

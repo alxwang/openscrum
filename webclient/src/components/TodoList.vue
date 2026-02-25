@@ -104,7 +104,7 @@
               <div class="flex-1 min-w-0">
                 <p 
                   class="text-sm font-medium pr-4" 
-                  :class="todo.status === 'completed' ? 'text-gray-500 line-through opacity-70' : (todo.status === 'in_progress' ? 'text-text-inverse' : 'text-gray-800')"
+                  :class="todo.status === 'completed' ? 'text-gray-400 line-through' : (todo.status === 'in_progress' ? 'text-text-inverse' : 'text-gray-800')"
                 >
                   {{ todo.content }}
                 </p>
@@ -219,7 +219,7 @@ const progressPercentage = computed(() => {
 
 const getStepBackgroundClass = (todo) => {
   if (todo.status === 'in_progress') return 'bg-gray-800/80 ring-1 ring-inset ring-accent shadow-inner'
-  if (todo.status === 'completed') return 'opacity-60 bg-transparent'
+  if (todo.status === 'completed') return 'bg-surface/30'
   return 'bg-transparent'
 }
 

@@ -27,7 +27,7 @@
                 Review Agent Changes
               </h3>
               <p class="text-sm text-gray-400 mt-0.5">
-                The agent has modified files. Please accept or reject these changes to continue.
+                Review all changed files before accepting or rejecting.
               </p>
             </div>
           </div>
@@ -39,28 +39,45 @@
           </div>
         </div>
 
-        <!-- Body / Diff Viewer -->
-        <div class="px-6 py-4 max-h-[60vh] overflow-y-auto bg-[#1e1e1e]">
-          <Diff
-            :mode="diffMode"
-            :theme="'dark'"
-            :language="'javascript'"
-            :prev="''"
-            :current="diffContent"
-            :virtual-scroll="{ height: 400 }"
-          />
+        <!-- Body / Split File List + Diff Viewer -->
+        <div class="px-6 py-4 h-[60vh] bg-[#1e1e1e]">
+          <div class="h-full grid grid-cols-[280px_1fr] gap-4">
+            <aside class="h-full border border-white/10 rounded-lg bg-surface overflow-hidden flex flex-col">
+              <div class="px-3 py-2 border-b border-white/10 text-xs text-black font-medium bg-white">
+                Changed Files ({{ normalizedFiles.length }})
+              </div>
+              <div class="flex-1 overflow-y-auto">
+                <button
+                  v-for="file in normalizedFiles"
+                  :key="file.path"
+                  @click="selectedPath = file.path"
+                  class="w-full text-left px-3 py-2 border-b border-white/5 hover:bg-white/80 transition-colors bg-white"
+                  :class="selectedPath === file.path ? 'bg-white' : ''"
+                >
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-xs text-black truncate">{{ file.path }}</span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded border" :class="statusBadgeClass(file.status)">
+                      {{ file.status || 'M' }}
+                    </span>
+                  </div>
+                </button>
+              </div>
+            </aside>
+
+            <section class="h-full border border-white/10 rounded-lg bg-[#111111] overflow-hidden flex flex-col">
+              <div class="px-3 py-2 border-b border-white/10 text-xs text-gray-300 font-medium">
+                {{ selectedFile?.path || 'No file selected' }}
+              </div>
+              <div class="flex-1 overflow-auto p-3">
+                <pre class="m-0 text-xs leading-5 font-mono whitespace-pre-wrap break-words text-gray-200"><template v-for="(line, idx) in selectedDiffLines" :key="idx"><div :class="diffLineClass(line)">{{ line || ' ' }}</div></template></pre>
+              </div>
+            </section>
+          </div>
         </div>
 
         <!-- Footer -->
         <div class="bg-surface border-t border-white/5 px-6 py-4 flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <button 
-              @click="diffMode = diffMode === 'split' ? 'unified' : 'split'"
-              class="px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5"
-            >
-              Toggle {{ diffMode === 'split' ? 'Unified' : 'Split' }} View
-            </button>
-          </div>
+          <div class="text-xs text-gray-400">Patch view</div>
           <div class="flex gap-3">
             <button 
               type="button" 
@@ -96,12 +113,16 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
   isOpen: {
     type: Boolean,
     default: false
+  },
+  changedFiles: {
+    type: Array,
+    default: () => []
   },
   diffContent: {
     type: String,
@@ -114,14 +135,68 @@ const props = defineProps({
 })
 
 defineEmits(['accept', 'reject'])
+const selectedPath = ref('')
 
-const diffMode = ref('split')
+const normalizedFiles = computed(() => {
+  if (Array.isArray(props.changedFiles) && props.changedFiles.length > 0) {
+    return props.changedFiles.map((f) => ({
+      path: f.path || '(unknown)',
+      status: f.status || '',
+      diff: f.diff || '',
+      untracked: !!f.untracked,
+    }))
+  }
+  if (props.diffContent && props.diffContent.trim()) {
+    return [{
+      path: 'all-changes.diff',
+      status: 'M',
+      diff: props.diffContent,
+      untracked: false,
+    }]
+  }
+  return []
+})
+
+watch(
+  () => [props.isOpen, normalizedFiles.value.map((f) => f.path).join('|')],
+  () => {
+    if (!props.isOpen) return
+    if (!normalizedFiles.value.length) {
+      selectedPath.value = ''
+      return
+    }
+    if (!selectedPath.value || !normalizedFiles.value.some((f) => f.path === selectedPath.value)) {
+      selectedPath.value = normalizedFiles.value[0].path
+    }
+  },
+  { immediate: true }
+)
+
+const selectedFile = computed(() => {
+  if (!normalizedFiles.value.length) return null
+  const picked = normalizedFiles.value.find((f) => f.path === selectedPath.value)
+  return picked || normalizedFiles.value[0]
+})
+
+const selectedDiff = computed(() => selectedFile.value?.diff || '')
+const selectedDiffLines = computed(() => selectedDiff.value.split('\n'))
+
+const statusBadgeClass = (status) => {
+  const s = (status || '').trim()
+  if (s === '??' || s.startsWith('A')) return 'bg-green-500/15 text-green-300 border-green-500/30'
+  if (s.startsWith('D')) return 'bg-red-500/15 text-red-300 border-red-500/30'
+  if (s.startsWith('R')) return 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+  return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30'
+}
+
+const diffLineClass = (line) => {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'text-sky-300'
+  if (line.startsWith('@@')) return 'text-violet-300'
+  if (line.startsWith('+')) return 'bg-green-500/10 text-green-300'
+  if (line.startsWith('-')) return 'bg-red-500/10 text-red-300'
+  return 'text-gray-200'
+}
 </script>
 
 <style>
-/* Adjust vue-diff container to match our dark theme seamlessly */
-.vue-diff-wrapper {
-  background-color: transparent !important;
-  border: none !important;
-}
 </style>

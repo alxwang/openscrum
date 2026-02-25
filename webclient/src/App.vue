@@ -363,7 +363,7 @@
       <div
         v-if="showViewerModal"
         class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
-        @click.self="showViewerModal = false"
+        @click.self="closeViewerModal"
       >
         <div class="bg-surface rounded-lg shadow-2xl w-full max-w-6xl h-[85vh] flex flex-col overflow-hidden">
           <!-- Modal Header -->
@@ -376,7 +376,7 @@
               </div>
             </div>
             <button
-              @click="showViewerModal = false"
+              @click="closeViewerModal"
               class="p-2 hover:bg-surface rounded-lg transition-colors text-text-muted hover:text-surface-dark"
             >
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -396,6 +396,7 @@
                 :content="modalViewerContent"
                 @save="handleSaveDesignDocModal"
                 @sync="handleSyncSingleDoc"
+                @close="closeViewerModal"
               />
               <!-- Code File Viewer -->
               <CodeViewer
@@ -404,7 +405,7 @@
                 :content="modalViewerContent"
                 :loading="false"
                 :error="null"
-                @close="showViewerModal = false"
+                @close="closeViewerModal"
               />
             </div>
           </div>
@@ -415,6 +416,7 @@
       <GitReviewModal
         :isOpen="requiresGitReview"
         :diffContent="gitDiffContent"
+        :changedFiles="gitChangedFiles"
         :isProcessing="isProcessingGitReview"
         @accept="handleAcceptGitChanges"
         @reject="handleRejectGitChanges"
@@ -586,6 +588,7 @@ const copiedMessagePosition = ref({ x: 0, y: 0 })
 // Git Review state
 const requiresGitReview = ref(false)
 const gitDiffContent = ref('')
+const gitChangedFiles = ref([])
 const isProcessingGitReview = ref(false)
 const activeTodoExecution = ref(null)
 const pendingTodoReview = ref(null)
@@ -1344,16 +1347,20 @@ const normalizeTodosForIdle = (incomingTodos) => {
   })
 }
 
-const toggleMode = () => {
+const toggleMode = async () => {
   const newMode = mode.value === 'plan' ? 'edit' : 'plan'
   mode.value = newMode
   
   if (sessionId.value) {
-    updateSession(sessionId.value, { mode: newMode }).catch(e => console.error('Failed to sync mode:', e))
+    try {
+      await updateSession(sessionId.value, { mode: newMode })
+    } catch (e) {
+      console.error('Failed to sync mode:', e)
+    }
   }
   
   if (newMode === 'edit' && sessionId.value) {
-    loadTodosForEditMode()
+    await loadTodosForEditMode()
   }
 }
 
@@ -1671,12 +1678,14 @@ const checkGitStatus = async ({ forceModal = false } = {}) => {
     if (status && status.has_changes) {
       console.log('[Git] Detected changes! Opening review modal.')
       gitDiffContent.value = status.diff
+      gitChangedFiles.value = Array.isArray(status.files) ? status.files : []
       requiresGitReview.value = true
       return true
     }
     if (forceModal) {
       requiresGitReview.value = false
       gitDiffContent.value = ''
+      gitChangedFiles.value = []
     }
     return false
   } catch (err) {
@@ -1702,6 +1711,7 @@ const handleAcceptGitChanges = async () => {
       // Dismiss modal
       requiresGitReview.value = false
       gitDiffContent.value = ''
+      gitChangedFiles.value = []
       pendingTodoReview.value = null
       
       // Post system message
@@ -1741,6 +1751,7 @@ const handleRejectGitChanges = async () => {
       // Dismiss modal
       requiresGitReview.value = false
       gitDiffContent.value = ''
+      gitChangedFiles.value = []
       pendingTodoReview.value = null
       
       // Refresh tree
@@ -1877,6 +1888,29 @@ const fetchDesignDocuments = async () => {
   }
 }
 
+const refreshOpenDesignDocModal = async () => {
+  if (!sessionId.value) return
+  if (!showViewerModal.value) return
+  if (modalViewerType.value !== 'design-doc') return
+  if (!modalViewerPath.value) return
+
+  try {
+    const response = await fetch(`http://localhost:8000/sessions/${sessionId.value}/design/${modalViewerPath.value}`)
+    if (!response.ok) return
+    const data = await response.json()
+    if (!data.exists) return
+
+    modalViewerContent.value = data.content || ''
+    modalViewerTitle.value = data.name || modalViewerTitle.value
+    modalViewerInfo.value = {
+      name: data.name || modalViewerInfo.value?.name || modalViewerPath.value,
+      description: designDocuments.value?.[modalViewerPath.value]?.description || modalViewerInfo.value?.description || ''
+    }
+  } catch (error) {
+    console.error('[Design] Failed to refresh open design doc modal:', error)
+  }
+}
+
 const handleSelectDesignDoc = async (docType) => {
   console.log('[Design] Selected document:', docType)
   selectedDesignDoc.value = docType
@@ -2006,6 +2040,10 @@ const handleCloseDesignDoc = () => {
   selectedDesignDocContent.value = null
 }
 
+const closeViewerModal = () => {
+  showViewerModal.value = false
+}
+
 const handleSaveDesignDoc = async ({ docType, content }) => {
   if (!sessionId.value || !docType) return
   
@@ -2064,6 +2102,22 @@ const loadTodosForEditMode = async () => {
   // Persist normalization so refresh/load stays consistent
   if (sessionId.value && JSON.stringify(normalized) !== JSON.stringify(fetched)) {
     await updateTodos(sessionId.value, normalized)
+  }
+
+  if (normalized.length === 0 && !isGeneratingTodos.value) {
+    isGeneratingTodos.value = true
+    try {
+      const generated = await generateTodos(sessionId.value)
+      const generatedNormalized = normalizeTodosForIdle(generated)
+      todos.value = generatedNormalized
+      if (sessionId.value) {
+        await updateTodos(sessionId.value, generatedNormalized)
+      }
+    } catch (e) {
+      console.error('Failed to auto-generate todos:', e)
+    } finally {
+      isGeneratingTodos.value = false
+    }
   }
 }
 
@@ -2348,6 +2402,7 @@ const sendMessage = async () => {
           if (mode.value === 'plan') {
             console.log('[Design] Refetching design documents after Agent response')
             await fetchDesignDocuments()
+            await refreshOpenDesignDocModal()
           }
           
           if (finalContent) {

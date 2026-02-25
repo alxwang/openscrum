@@ -10,6 +10,7 @@ import re
 import json
 import subprocess
 import glob as pyglob
+import difflib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -1394,11 +1395,68 @@ def design_update_section(doc_type: str, section: str, content: str) -> str:
         return f"Error: Unknown document type '{doc_type}'. Available types: {available}"
     
     manager = DesignDocumentManager(workspace_root)
+    doc_path = manager.get_doc_path(doc_type)
+    before = manager.read_document(doc_type) or ""
     manager.update_section(doc_type, section, content)
+    after = manager.read_document(doc_type) or ""
+
+    if before == after:
+        heading_re = re.compile(r'^\s{0,3}#{1,6}\s+(.*?)\s*$')
+        headings = []
+        for line in before.splitlines():
+            m = heading_re.match(line)
+            if m:
+                headings.append(m.group(1).strip())
+        _log.warning(
+            "[design_update_section] No file-content change detected for %s (section=%s, path=%s). headings=%s content_preview=%r",
+            doc_type, section, doc_path, headings[:20], content[:200],
+        )
+        return (
+            f"Error: Section update reported no content change for '{section}'. "
+            f"Document path: {doc_path}\n"
+            f"Known headings: {headings[:20]}"
+        )
+
+    _log.info(
+        "[design_update_section] Updated section '%s' in %s at %s (before=%d chars, after=%d chars)",
+        section, doc_type, doc_path, len(before), len(after),
+    )
+
+    # Build a compact preview of changed lines for immediate verification.
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    diff_lines = list(
+        difflib.unified_diff(
+            before_lines,
+            after_lines,
+            fromfile="before",
+            tofile="after",
+            lineterm="",
+        )
+    )
+    # Keep only real additions/removals, skip headers/hunks
+    changed = [ln for ln in diff_lines if (ln.startswith("+") or ln.startswith("-")) and not ln.startswith("+++") and not ln.startswith("---")]
+    preview_lines = changed[:20]
+    # ANSI colors for terminal-friendly diff readability.
+    RED = "\x1b[31m"
+    GREEN = "\x1b[32m"
+    RESET = "\x1b[0m"
+    colored_preview_lines = []
+    for ln in preview_lines:
+        if ln.startswith("+"):
+            colored_preview_lines.append(f"{GREEN}{ln}{RESET}")
+        elif ln.startswith("-"):
+            colored_preview_lines.append(f"{RED}{ln}{RESET}")
+        else:
+            colored_preview_lines.append(ln)
+    preview = "\n".join(colored_preview_lines)
+    if len(changed) > len(preview_lines):
+        preview += f"\n... ({len(changed) - len(preview_lines)} more changed lines)"
     
-    _log.info(f"[design_update_section] Updated section '{section}' in {doc_type}")
-    
-    return f"✓ Updated section '{section}' in {DESIGN_DOC_TYPES[doc_type]['name']} document"
+    return (
+        f"✓ Updated section '{section}' in {DESIGN_DOC_TYPES[doc_type]['name']} document "
+        f"at: {doc_path}\n\nChange preview:\n{preview if preview else '(unable to compute line preview)'}"
+    )
 
 
 # Plan Tools (Plan Mode Entry/Exit)
