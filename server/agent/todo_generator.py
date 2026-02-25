@@ -10,8 +10,14 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 try:
     from server.storage.todo import get_todos, update_todos
+    from server.workspace_log import append_workspace_log
 except ImportError:
     from storage.todo import get_todos, update_todos
+    try:
+        from workspace_log import append_workspace_log
+    except ImportError:
+        def append_workspace_log(*args, **kwargs):
+            return None
 
 _log = logging.getLogger(__name__)
 
@@ -85,9 +91,32 @@ Design Documents:
     try:
         model_name = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
         llm = ChatOpenAI(model=model_name, temperature=0.1, model_kwargs={"response_format": {"type": "json_object"}})
+        append_workspace_log(
+            workspace_root,
+            "llm_request",
+            {
+                "session_id": session_id,
+                "source": "todo_generator",
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "human", "content": human_msg},
+                ],
+            },
+        )
         
         _log.info(f"[{session_id}] Generating Todos from {len(docs_content)} chars of docs using {model_name}...")
         res = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=human_msg)])
+        append_workspace_log(
+            workspace_root,
+            "llm_response",
+            {
+                "session_id": session_id,
+                "source": "todo_generator",
+                "model": model_name,
+                "content": str(res.content),
+            },
+        )
         
         data = json.loads(str(res.content))
         new_todos = data.get("todos", [])
@@ -111,4 +140,13 @@ Design Documents:
         
     except Exception as e:
         _log.error(f"Failed to generate todos: {e}")
+        append_workspace_log(
+            workspace_root,
+            "llm_error",
+            {
+                "session_id": session_id,
+                "source": "todo_generator",
+                "error": str(e),
+            },
+        )
         return current_todos

@@ -434,46 +434,85 @@ class DesignDocumentManager:
             # Normalize markdown heading text for exact, resilient matching.
             normalized = text.strip().lower()
             normalized = re.sub(r'[*_`]+', '', normalized)
+            # Treat "1. Frontend" and "Frontend" as the same section name.
+            normalized = re.sub(r'^\d+\.\s*', '', normalized)
             normalized = re.sub(r'\s+', ' ', normalized)
             return normalized
 
         target_heading = _normalize_heading(section)
         heading_re = re.compile(r'^\s{0,3}(#{1,6})\s+(.*?)\s*$')
+        numbered_section_re = re.compile(r'^\s*(\d+)\.\s+(.*?)\s*$')
 
         start_idx = -1
         start_level = 0
         matched_heading_raw = ""
+        matched_mode = ""
         candidate_headings: list[str] = []
+        matches: list[dict[str, int | str]] = []  # {idx, mode, level, raw}
 
         for idx, line in enumerate(lines):
             m = heading_re.match(line)
-            if not m:
-                continue
-            level = len(m.group(1))
-            heading_text_raw = m.group(2).strip()
-            heading_text = _normalize_heading(heading_text_raw)
-            candidate_headings.append(heading_text_raw)
-            if heading_text == target_heading:
-                start_idx = idx
-                start_level = level
-                matched_heading_raw = heading_text_raw
-                break
+            if m:
+                level = len(m.group(1))
+                heading_text_raw = m.group(2).strip()
+                heading_text = _normalize_heading(heading_text_raw)
+                candidate_headings.append(heading_text_raw)
+                if heading_text == target_heading:
+                    matches.append({"idx": idx, "mode": "markdown", "level": level, "raw": heading_text_raw})
+
+            n = numbered_section_re.match(line)
+            if n:
+                heading_text_raw = n.group(2).strip()
+                heading_text = _normalize_heading(heading_text_raw)
+                candidate_headings.append(heading_text_raw)
+                if heading_text == target_heading:
+                    matches.append({"idx": idx, "mode": "numbered", "level": 0, "raw": heading_text_raw})
+
+        # Prefer the earliest matching section in the document.
+        if matches:
+            matches.sort(key=lambda m: int(m["idx"]))
+            first = matches[0]
+            start_idx = int(first["idx"])
+            start_level = int(first["level"])
+            matched_heading_raw = str(first["raw"])
+            matched_mode = str(first["mode"])
+
+        def _section_end_idx(lines_: list[str], section_start: int, mode: str, level: int) -> int:
+            end = len(lines_)
+            if mode == "numbered":
+                for idx in range(section_start + 1, len(lines_)):
+                    if numbered_section_re.match(lines_[idx]):
+                        end = idx
+                        break
+            else:
+                for idx in range(section_start + 1, len(lines_)):
+                    m = heading_re.match(lines_[idx])
+                    if m and len(m.group(1)) <= level:
+                        end = idx
+                        break
+            return end
 
         before_len = len(current_content)
         if start_idx >= 0:
-            # Replace until next heading of same/higher level.
-            end_idx = len(lines)
-            for idx in range(start_idx + 1, len(lines)):
-                m = heading_re.match(lines[idx])
-                if m and len(m.group(1)) <= start_level:
-                    end_idx = idx
-                    break
+            # Remove duplicate sections with the same normalized name, keeping the first one.
+            duplicate_ranges: list[tuple[int, int]] = []
+            for m in matches[1:]:
+                dup_start = int(m["idx"])
+                dup_mode = str(m["mode"])
+                dup_level = int(m["level"])
+                dup_end = _section_end_idx(lines, dup_start, dup_mode, dup_level)
+                duplicate_ranges.append((dup_start, dup_end))
+
+            for dup_start, dup_end in sorted(duplicate_ranges, key=lambda r: r[0], reverse=True):
+                del lines[dup_start:dup_end]
+
+            end_idx = _section_end_idx(lines, start_idx, matched_mode, start_level)
 
             replacement = [lines[start_idx], content]
             new_lines = lines[:start_idx] + replacement + lines[end_idx:]
             log.info(
-                "[DesignDocumentManager.update_section] doc=%s path=%s section=%r matched_heading=%r level=%s replace_range=[%s,%s)",
-                doc_type, doc_path, section, matched_heading_raw, start_level, start_idx, end_idx,
+                "[DesignDocumentManager.update_section] doc=%s path=%s section=%r matched_heading=%r mode=%s level=%s replace_range=[%s,%s) removed_duplicates=%d",
+                doc_type, doc_path, section, matched_heading_raw, matched_mode, start_level, start_idx, end_idx, len(duplicate_ranges),
             )
         else:
             # If exact heading wasn't found, append a new section.

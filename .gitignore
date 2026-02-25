@@ -208,3 +208,7 @@ __marimo__/
 
 # OpenScrum workspace directories
 workspace/
+
+# OpenScrum runtime detailed log
+openscrum-detailed-log.jsonl
+**/openscrum-detailed-log.jsonl

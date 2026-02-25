@@ -39,11 +39,23 @@ from ..tools.system_tools import (
     grep, glob, list_files, bash, webfetch,
     todowrite, todoread, question,
     task, websearch, codesearch, batch, lsp,
-    design_create, design_read, design_write, design_list, design_update_section,
+    design_create, design_read, design_write, design_list,
     plan_exit, plan_enter,
     scan_codebase, extract_api_routes, extract_db_schemas, list_components, list_services, generate_design_from_code, generate_gap_analysis,
     __all__ as TOOL_NAMES,
 )
+try:
+    from server.workspace_log import append_workspace_log
+    from server.tools.context import get_tool_context
+except ImportError:
+    try:
+        from workspace_log import append_workspace_log
+        from tools.context import get_tool_context
+    except ImportError:
+        def append_workspace_log(*args, **kwargs):
+            return None
+        def get_tool_context():
+            return None
 
 
 # ============================================================================
@@ -67,6 +79,25 @@ def create_prompt_registry(workspace_root: str = None, app_root: str = None) -> 
         # OpenScrum app root = directory containing server/ and prompts/
         app_root = str(Path(__file__).resolve().parent.parent.parent)
     return PromptRegistry(workspace_root=workspace_root, app_root=app_root)
+
+
+def _workspace_log_llm(event: str, payload: Dict[str, Any]) -> None:
+    ctx = get_tool_context()
+    if not ctx or len(ctx) < 2:
+        return
+    append_workspace_log(str(ctx[1]), event, payload)
+
+
+def _serialize_messages_for_log(messages: List[BaseMessage]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        role = getattr(m, "type", m.__class__.__name__).lower()
+        entry: Dict[str, Any] = {"role": role, "content": str(getattr(m, "content", "") or "")}
+        tc = getattr(m, "tool_calls", None)
+        if tc:
+            entry["tool_calls"] = tc
+        out.append(entry)
+    return out
 
 
 # ============================================================================
@@ -98,7 +129,6 @@ def get_tools(workspace_root: str = None):
         design_read,
         design_write,
         design_list,
-        design_update_section,
         plan_exit,
         plan_enter,
         scan_codebase,
@@ -138,7 +168,6 @@ def get_plan_mode_tools(workspace_root: str = None):
         design_read,
         design_write,
         design_list,
-        design_update_section,
         # Reverse Engineering Extractors
         scan_codebase,
         extract_api_routes,
@@ -393,6 +422,26 @@ def planner_node(
     # Build messages
     messages = state["messages"]
 
+    def _tool_exec_summary_since_last_user(msgs: list[BaseMessage]) -> tuple[int, int]:
+        """
+        Returns (tool_result_count, failed_tool_result_count) after the latest HumanMessage.
+        """
+        last_human_idx = -1
+        for i in range(len(msgs) - 1, -1, -1):
+            if isinstance(msgs[i], HumanMessage):
+                last_human_idx = i
+                break
+        scan = msgs[last_human_idx + 1:] if last_human_idx >= 0 else msgs
+        total = 0
+        failed = 0
+        for m in scan:
+            if isinstance(m, ToolMessage):
+                total += 1
+                text = str(getattr(m, "content", "") or "").strip().lower()
+                if text.startswith("error:") or "error executing tool" in text:
+                    failed += 1
+        return total, failed
+
     # Bind plan mode tools (design tools + read-only tools)
     tools = get_plan_mode_tools(workspace_root)
     llm_with_tools = llm.bind_tools(tools).with_config({"run_name": "planner"})
@@ -403,12 +452,70 @@ def planner_node(
         MessagesPlaceholder(variable_name="messages"),
     ])
     
+    def _response_claims_action_without_evidence(ai_content: str) -> bool:
+        """
+        Detect likely false-positive text-only confirmations.
+        We key off the MODEL'S own claims (not user keywords), e.g.:
+        "I updated/scanned/changed/wrote/created ..."
+        """
+        if not ai_content:
+            return False
+        t = ai_content.strip().lower()
+
+        # Strong completion/operation claims (active + passive voice).
+        claim_phrases = [
+            "i updated", "updated the", "has been updated", "have been updated",
+            "i changed", "changed the", "has been changed", "have been changed",
+            "i modified", "modified the", "has been modified", "have been modified",
+            "i rewrote", "rewrote the", "has been rewritten", "have been rewritten",
+            "i created", "created the", "has been created", "have been created",
+            "i wrote", "wrote the", "has been written", "have been written",
+            "i scanned", "scanned the", "has been scanned", "have been scanned",
+            "is set to", "has been set", "set to vue", "switched to",
+            "applied the", "done", "completed", "confirmed",
+        ]
+        # Future-action commitments that still require immediate tool calls.
+        promise_phrases = [
+            "i will update", "i'll update", "i can update", "i can modify",
+            "i will change", "i'll change", "i will scan", "i'll scan",
+            "i can propagate", "i will propagate",
+        ]
+        # Mutating/scanning objects where tool execution should exist.
+        target_phrases = [
+            "design", "document", "tech_stack", "tech stack", "frontend",
+            "architecture", "api", "database", "requirements",
+            "codebase", "workspace", "file", "section",
+        ]
+        has_target = any(s in t for s in target_phrases)
+        has_claim = any(p in t for p in claim_phrases)
+        has_promise = any(p in t for p in promise_phrases)
+        return has_target and (has_claim or has_promise)
+
     # Call LLM with tools - catch context length errors
     chain = prompt | llm_with_tools
     
     _log.info("[PLANNER NODE] Calling LLM with %d messages", len(messages))
+    ctx = get_tool_context()
+    sid = ctx[0] if ctx and len(ctx) > 0 else ""
+    _workspace_log_llm(
+        "llm_request",
+        {
+            "session_id": sid,
+            "source": "planner_node",
+            "messages": _serialize_messages_for_log(messages),
+        },
+    )
     try:
         response = chain.invoke({"messages": messages})
+        _workspace_log_llm(
+            "llm_response",
+            {
+                "session_id": sid,
+                "source": "planner_node",
+                "content": str(getattr(response, "content", "") or ""),
+                "tool_calls": getattr(response, "tool_calls", None) or [],
+            },
+        )
         _log.info("[PLANNER NODE] LLM response received - content length: %d, tool_calls: %d", 
                   len(str(response.content)) if hasattr(response, 'content') else 0,
                   len(getattr(response, 'tool_calls', [])))
@@ -440,8 +547,202 @@ def planner_node(
         # Re-raise if it's not a context length error
         raise
     
-    # Use response directly if it has valid tool_calls (LangChain format)
     raw_tool_calls = getattr(response, "tool_calls", None)
+    response_text = str(getattr(response, "content", "") or "")
+    tool_exec_count, failed_tool_exec_count = _tool_exec_summary_since_last_user(messages)
+    had_any_tool_exec = tool_exec_count > 0
+    had_failed_tool_exec = failed_tool_exec_count > 0
+
+    def _tool_call_name(tc: Any) -> str:
+        if isinstance(tc, dict):
+            return str(tc.get("name", "") or "")
+        return str(getattr(tc, "name", "") or "")
+
+    # Guardrail: if model text claims it changed/scanned something but returned no tool_calls,
+    # force one retry with strict reminder to emit concrete design_* tool calls.
+    if (
+        not had_any_tool_exec
+        and _response_claims_action_without_evidence(response_text)
+        and not (isinstance(raw_tool_calls, list) and raw_tool_calls)
+    ):
+        _log.warning("[PLANNER NODE] Missing tool call for design-update intent; retrying with strict reminder")
+        retry_messages = list(messages) + [
+            HumanMessage(
+                content=(
+                    "SYSTEM ENFORCEMENT: Your prior response claimed or committed an action but provided no tool_calls. "
+                    "You MUST execute tool calls in this retry. "
+                    "At minimum call design_read(doc_type='tech_stack') to verify current state. "
+                    "If any change is needed, call design_write with the full updated document content. "
+                    "Do NOT respond with text-only confirmation."
+                )
+            )
+        ]
+        try:
+            _workspace_log_llm(
+                "llm_request",
+                {
+                    "session_id": sid,
+                    "source": "planner_node_retry_missing_tool_call",
+                    "messages": _serialize_messages_for_log(retry_messages),
+                },
+            )
+            response_retry = chain.invoke({"messages": retry_messages})
+            _workspace_log_llm(
+                "llm_response",
+                {
+                    "session_id": sid,
+                    "source": "planner_node_retry_missing_tool_call",
+                    "content": str(getattr(response_retry, "content", "") or ""),
+                    "tool_calls": getattr(response_retry, "tool_calls", None) or [],
+                },
+            )
+            retry_tool_calls = getattr(response_retry, "tool_calls", None)
+            if isinstance(retry_tool_calls, list) and retry_tool_calls:
+                response = response_retry
+                raw_tool_calls = retry_tool_calls
+                _log.info("[PLANNER NODE] Retry produced %d tool calls", len(retry_tool_calls))
+            else:
+                _log.error("[PLANNER NODE] Retry still produced no tool calls after claimed action text")
+                response = AIMessage(
+                    content=json.dumps({
+                        "content": (
+                            "I claimed an update but no tool call was produced. "
+                            "No document changes were executed. Please retry the request."
+                        )
+                    }),
+                    tool_calls=[]
+                )
+                raw_tool_calls = []
+        except Exception as retry_err:
+            _log.exception("[PLANNER NODE] Retry failed: %s", retry_err)
+
+    # Guardrail: action/update claims must include at least one mutating design call.
+    # Repeated read-only verification should not count as execution evidence.
+    if (
+        not had_any_tool_exec
+        and _response_claims_action_without_evidence(response_text)
+        and isinstance(raw_tool_calls, list)
+        and raw_tool_calls
+    ):
+        names = [_tool_call_name(tc) for tc in raw_tool_calls]
+        has_mutating_design_call = any(n in {"design_write", "design_create"} for n in names)
+        if not has_mutating_design_call:
+            _log.warning(
+                "[PLANNER NODE] Claimed action but only read-only tool calls were emitted (%s); retrying for mutating call",
+                names,
+            )
+            retry_messages = list(messages) + [
+                HumanMessage(
+                    content=(
+                        "SYSTEM ENFORCEMENT: Your prior response claimed an update/change, but only read-only tool calls were emitted. "
+                        "You MUST call design_write with the full updated document content now. "
+                        "If the document is already correct, still call design_write to normalize/overwrite stale variants and ensure consistency. "
+                        "Do NOT reply with read-only verification only."
+                    )
+                )
+            ]
+            try:
+                _workspace_log_llm(
+                    "llm_request",
+                    {
+                        "session_id": sid,
+                        "source": "planner_node_retry_mutating_call",
+                        "messages": _serialize_messages_for_log(retry_messages),
+                    },
+                )
+                response_retry = chain.invoke({"messages": retry_messages})
+                _workspace_log_llm(
+                    "llm_response",
+                    {
+                        "session_id": sid,
+                        "source": "planner_node_retry_mutating_call",
+                        "content": str(getattr(response_retry, "content", "") or ""),
+                        "tool_calls": getattr(response_retry, "tool_calls", None) or [],
+                    },
+                )
+                retry_tool_calls = getattr(response_retry, "tool_calls", None)
+                if isinstance(retry_tool_calls, list) and retry_tool_calls:
+                    response = response_retry
+                    raw_tool_calls = retry_tool_calls
+                    _log.info("[PLANNER NODE] Retry produced %d tool calls after read-only mismatch", len(retry_tool_calls))
+                else:
+                    _log.error("[PLANNER NODE] Retry still produced no tool calls after read-only mismatch")
+                    response = AIMessage(
+                        content=json.dumps({
+                            "content": (
+                                "No document changes were executed. "
+                                "The model emitted read-only verification without a mutating design tool call."
+                            )
+                        }),
+                        tool_calls=[]
+                    )
+                    raw_tool_calls = []
+            except Exception as retry_err:
+                _log.exception("[PLANNER NODE] Retry failed after read-only mismatch: %s", retry_err)
+
+    # If previous tools in this user turn failed, do not allow text-only completion claims.
+    if (
+        had_failed_tool_exec
+        and _response_claims_action_without_evidence(response_text)
+        and not (isinstance(raw_tool_calls, list) and raw_tool_calls)
+    ):
+        _log.warning(
+            "[PLANNER NODE] Prior tool failures detected (%d/%d); blocking text-only completion claim",
+            failed_tool_exec_count,
+            tool_exec_count,
+        )
+        retry_messages = list(messages) + [
+            HumanMessage(
+                content=(
+                    "SYSTEM ENFORCEMENT: One or more prior tool executions failed in this turn. "
+                    "Do NOT claim completion in text-only form. "
+                    "Either emit corrective tool calls now, or explicitly report that changes were not completed due to tool errors."
+                )
+            )
+        ]
+        try:
+            _workspace_log_llm(
+                "llm_request",
+                {
+                    "session_id": sid,
+                    "source": "planner_node_retry_failed_tool_exec",
+                    "messages": _serialize_messages_for_log(retry_messages),
+                },
+            )
+            response_retry = chain.invoke({"messages": retry_messages})
+            _workspace_log_llm(
+                "llm_response",
+                {
+                    "session_id": sid,
+                    "source": "planner_node_retry_failed_tool_exec",
+                    "content": str(getattr(response_retry, "content", "") or ""),
+                    "tool_calls": getattr(response_retry, "tool_calls", None) or [],
+                },
+            )
+            retry_tool_calls = getattr(response_retry, "tool_calls", None)
+            retry_text = str(getattr(response_retry, "content", "") or "")
+            if isinstance(retry_tool_calls, list) and retry_tool_calls:
+                response = response_retry
+                raw_tool_calls = retry_tool_calls
+                _log.info("[PLANNER NODE] Failure-recovery retry produced %d tool calls", len(retry_tool_calls))
+            elif _response_claims_action_without_evidence(retry_text):
+                response = AIMessage(
+                    content=json.dumps({
+                        "content": (
+                            "Some tool executions failed, so no further changes were completed in this turn. "
+                            "Please retry or adjust the request."
+                        )
+                    }),
+                    tool_calls=[]
+                )
+                raw_tool_calls = []
+            else:
+                response = response_retry
+                raw_tool_calls = retry_tool_calls
+        except Exception as retry_err:
+            _log.exception("[PLANNER NODE] Failure-recovery retry failed: %s", retry_err)
+
+    # Use response directly if it has valid tool_calls (LangChain format)
     if isinstance(raw_tool_calls, list) and raw_tool_calls:
         # LLM made proper tool calls - use response as-is
         parsed_response = response
@@ -521,8 +822,27 @@ def editor_node(
     
     # Call LLM with tools - catch context length errors
     chain = prompt | llm_with_tools
+    ctx = get_tool_context()
+    sid = ctx[0] if ctx and len(ctx) > 0 else ""
+    _workspace_log_llm(
+        "llm_request",
+        {
+            "session_id": sid,
+            "source": "editor_node",
+            "messages": _serialize_messages_for_log(messages),
+        },
+    )
     try:
         response = chain.invoke({"messages": messages})
+        _workspace_log_llm(
+            "llm_response",
+            {
+                "session_id": sid,
+                "source": "editor_node",
+                "content": str(getattr(response, "content", "") or ""),
+                "tool_calls": getattr(response, "tool_calls", None) or [],
+            },
+        )
     except Exception as e:
         # Check if it's a context length exceeded error
         error_msg = str(e)
@@ -629,6 +949,53 @@ def should_call_tools_from_planner(state: AgentState) -> Literal["tools", END]:
     # Check for tool calls
     if isinstance(last_message, AIMessage):
         if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            def _tc_name(tc: Any) -> str:
+                if isinstance(tc, dict):
+                    return str(tc.get("name", "") or "")
+                return str(getattr(tc, "name", "") or "")
+
+            def _tc_args(tc: Any) -> dict:
+                raw = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+                if isinstance(raw, dict):
+                    return raw
+                if isinstance(raw, str) and raw.strip():
+                    try:
+                        return json.loads(raw)
+                    except json.JSONDecodeError:
+                        return {}
+                return {}
+
+            def _tool_call_signature(ai_msg: AIMessage) -> tuple:
+                calls = getattr(ai_msg, "tool_calls", None) or []
+                sig = []
+                for tc in calls:
+                    name = _tc_name(tc)
+                    args = _tc_args(tc)
+                    sig.append((name, json.dumps(args, sort_keys=True, default=str)))
+                return tuple(sig)
+
+            pending_calls = list(last_message.tool_calls)
+            pending_names = [_tc_name(tc) for tc in pending_calls]
+
+            # Loop breaker: prevent repeated read-only verification cycles.
+            # Pattern seen in logs: design_read -> planner -> design_read (same docs) -> ...
+            if pending_names and all(n == "design_read" for n in pending_names):
+                prev_ai_with_tools = None
+                for msg in reversed(messages[:-1]):
+                    if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                        prev_ai_with_tools = msg
+                        break
+                if prev_ai_with_tools is not None:
+                    prev_sig = _tool_call_signature(prev_ai_with_tools)
+                    curr_sig = _tool_call_signature(last_message)
+                    if prev_sig == curr_sig:
+                        _log = logging.getLogger(__name__)
+                        _log.warning(
+                            "[Loop Prevention] Blocking repeated planner read-only cycle: %s",
+                            [n for n in pending_names],
+                        )
+                        return END
+
             # Before executing tools, check if we just executed the same tools
             # Look for ToolMessages in the last 20 messages
             recent_tool_messages = [

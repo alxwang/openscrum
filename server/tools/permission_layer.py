@@ -59,7 +59,6 @@ TOOL_PERMISSION: Dict[str, str] = {
     "design_read": "design_read",
     "design_write": "design_write",
     "design_list": "design_list",
-    "design_update_section": "design_update_section",
 }
 
 
@@ -112,7 +111,7 @@ def patterns_for_tool(tool_name: str, args: Dict[str, Any], workspace_root: str 
     if perm == "lsp":
         return ["*"]
     # Design document tools (plan mode)
-    if perm in ("design_create", "design_read", "design_write", "design_list", "design_update_section"):
+    if perm in ("design_create", "design_read", "design_write", "design_list"):
         return ["*"]
     return ["*"]
 

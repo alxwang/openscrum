@@ -362,13 +362,74 @@ def _auto_sync_design_docs_from_code(session_id: str, workspace_root: str) -> di
         return {"success": False, "message": "sync_tools_unavailable"}
 
     now = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    _append_workspace_log(
+        workspace_root,
+        "auto_sync_start",
+        {"session_id": session_id, "source": "git_commit"},
+    )
     set_tool_context(session_id, workspace_root, [])
     try:
+        sync_call_id = f"autosync_{int(time.time() * 1000)}"
+
+        _append_workspace_log(
+            workspace_root,
+            "tool_call",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_scan", "tool_name": "scan_codebase", "tool_input": {}},
+        )
         overview = scan_codebase.invoke({})
+        _append_workspace_log(
+            workspace_root,
+            "tool_result",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_scan", "tool_name": "scan_codebase", "tool_output": str(overview)},
+        )
+
+        _append_workspace_log(
+            workspace_root,
+            "tool_call",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_api", "tool_name": "extract_api_routes", "tool_input": {}},
+        )
         api_routes = extract_api_routes.invoke({})
+        _append_workspace_log(
+            workspace_root,
+            "tool_result",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_api", "tool_name": "extract_api_routes", "tool_output": str(api_routes)},
+        )
+
+        _append_workspace_log(
+            workspace_root,
+            "tool_call",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_db", "tool_name": "extract_db_schemas", "tool_input": {}},
+        )
         db_schemas = extract_db_schemas.invoke({})
+        _append_workspace_log(
+            workspace_root,
+            "tool_result",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_db", "tool_name": "extract_db_schemas", "tool_output": str(db_schemas)},
+        )
+
+        _append_workspace_log(
+            workspace_root,
+            "tool_call",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_components", "tool_name": "list_components", "tool_input": {}},
+        )
         components = list_components.invoke({})
+        _append_workspace_log(
+            workspace_root,
+            "tool_result",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_components", "tool_name": "list_components", "tool_output": str(components)},
+        )
+
+        _append_workspace_log(
+            workspace_root,
+            "tool_call",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_services", "tool_name": "list_services", "tool_input": {}},
+        )
         services = list_services.invoke({})
+        _append_workspace_log(
+            workspace_root,
+            "tool_result",
+            {"session_id": session_id, "call_id": f"{sync_call_id}_services", "tool_name": "list_services", "tool_output": str(services)},
+        )
     finally:
         clear_tool_context()
 
@@ -391,11 +452,17 @@ def _auto_sync_design_docs_from_code(session_id: str, workspace_root: str) -> di
         except Exception:
             continue
 
-    return {
+    result = {
         "success": len(written_docs) > 0,
         "written_docs": written_docs,
         "timestamp": now,
     }
+    _append_workspace_log(
+        workspace_root,
+        "auto_sync_done",
+        {"session_id": session_id, **result},
+    )
+    return result
 
 
 # ============================================================================
@@ -511,7 +578,6 @@ def get_default_workspace_permissions() -> list[dict]:
         {"permission": "design_read", "pattern": "*", "action": "allow"},
         {"permission": "design_write", "pattern": "*", "action": "allow"},
         {"permission": "design_list", "pattern": "*", "action": "allow"},
-        {"permission": "design_update_section", "pattern": "*", "action": "allow"},
         
         # Auto-approve read-only codebase scanning operations
         {"permission": "analyze_workspace", "pattern": "*", "action": "allow"},
@@ -708,7 +774,7 @@ async def stream_agent_response_with_save(
                     # Handle tool calls
                     if hasattr(message, 'tool_calls') and message.tool_calls:
                         for tool_call in message.tool_calls:
-                            _name = tool_call.get("name", "") if isinstance(tool_call, dict) else getattr(tool_call, "name", "") or ""
+                            _name = (tool_call.get("name", "") if isinstance(tool_call, dict) else getattr(tool_call, "name", "") or "") or "unknown"
                             call_id = tool_call.get("id", f"call_{len(tool_calls_saved)}") if isinstance(tool_call, dict) else getattr(tool_call, "id", f"call_{len(tool_calls_saved)}")
                             raw_args = tool_call.get("args") if isinstance(tool_call, dict) else getattr(tool_call, "args", None)
                             args = _normalize_tool_args(raw_args)
@@ -751,8 +817,20 @@ async def stream_agent_response_with_save(
                             yield f"data: {chat_chunk.model_dump_json()}\n\n"
                     # Handle tool results
                     if isinstance(message, ToolMessage):
-                        call_id = message.tool_call_id
-                        tool_name = getattr(message, 'name', tool_calls_saved.get(call_id, {}).get("name", "unknown"))
+                        call_id = str(getattr(message, "tool_call_id", "") or "")
+                        saved_tool = tool_calls_saved.get(call_id, {}) if call_id else {}
+                        tool_name = getattr(message, "name", None) or saved_tool.get("name")
+                        if not tool_name:
+                            # LangChain ToolMessage may omit `name`; keep a final defensive fallback.
+                            try:
+                                msg_dump = message.model_dump()
+                                tool_name = (
+                                    msg_dump.get("name")
+                                    or msg_dump.get("additional_kwargs", {}).get("name")
+                                )
+                            except Exception:
+                                tool_name = None
+                        tool_name = str(tool_name or "unknown")
                         tool_output = str(message.content)
                         _log.info(f"[Tool Result] {tool_name} returned: {tool_output[:200]}")
                         _append_workspace_log(
@@ -843,6 +921,15 @@ async def stream_agent_response_with_save(
         
         # Send the complete final content in the done chunk so frontend can check for questions
         full_text = "\n".join(assistant_text_parts) if assistant_text_parts else ""
+        if not full_text and tool_calls_saved:
+            tool_names = [v.get("name", "unknown") for v in tool_calls_saved.values()]
+            preview = ", ".join(tool_names[:3])
+            if len(tool_names) > 3:
+                preview += f", +{len(tool_names) - 3} more"
+            full_text = (
+                "Execution finished with tool calls but no textual assistant response was generated.\n\n"
+                f"Tools called: {preview}"
+            )
         _append_workspace_log(
             workspace_root,
             "llm_response",
@@ -1205,16 +1292,47 @@ if SESSION_AVAILABLE:
     async def update_session(session_id: str, request: UpdateSessionRequest):
         print(f"PATCH SESSION {session_id} - request: {request}", flush=True)
         session_svc = get_session()
+        current_session = session_svc.get(session_id)
         if request.mode is not None:
             mode_value = str(request.mode).strip().lower()
             if mode_value not in {"plan", "edit"}:
                 raise HTTPException(status_code=400, detail="mode must be either 'plan' or 'edit'")
+        mode_changed = False
+        old_mode = str(current_session.get("mode", "plan")).strip().lower()
+        new_mode = old_mode
+        if request.mode is not None:
+            new_mode = str(request.mode).strip().lower()
+            mode_changed = new_mode != old_mode
         def editor(d):
             if request.title is not None:
                 d["title"] = request.title
             if request.mode is not None:
-                d["mode"] = str(request.mode).strip().lower()
-        return session_svc.update(session_id, editor, touch=False)
+                d["mode"] = new_mode
+                if mode_changed:
+                    # Context boundary: LLM history before this timestamp is ignored after mode switch.
+                    now_ms = int(time.time() * 1000)
+                    d["mode_context_start_ms"] = now_ms
+                    d["mode_switch"] = {
+                        "from": old_mode,
+                        "to": new_mode,
+                        "at_ms": now_ms,
+                    }
+        updated = session_svc.update(session_id, editor, touch=False)
+        if mode_changed:
+            try:
+                _append_workspace_log(
+                    str(current_session.get("directory", "")),
+                    "mode_switch",
+                    {
+                        "session_id": session_id,
+                        "from_mode": old_mode,
+                        "to_mode": new_mode,
+                        "mode_context_start_ms": int(updated.get("mode_context_start_ms") or 0),
+                    },
+                )
+            except Exception:
+                pass
+        return updated
 
     @app.delete("/sessions/{session_id}", summary="Delete session")
     async def delete_session(session_id: str):
@@ -1239,7 +1357,17 @@ if SESSION_AVAILABLE:
             
             set_tool_context(session_id, str(workspace_root_path), [])
             try:
+                _append_workspace_log(
+                    str(workspace_root_path),
+                    "tool_call",
+                    {"session_id": session_id, "tool_name": "analyze_workspace", "tool_input": {}},
+                )
                 result_json = analyze_workspace.invoke({})
+                _append_workspace_log(
+                    str(workspace_root_path),
+                    "tool_result",
+                    {"session_id": session_id, "tool_name": "analyze_workspace", "tool_output": str(result_json)},
+                )
                 import json
                 return json.loads(result_json)
             finally:
@@ -1259,7 +1387,17 @@ if SESSION_AVAILABLE:
             
             set_tool_context(session_id, str(workspace_root_path), [])
             try:
+                _append_workspace_log(
+                    str(workspace_root_path),
+                    "tool_call",
+                    {"session_id": session_id, "tool_name": "check_sync_status", "tool_input": {}},
+                )
                 result_json = check_sync_status.invoke({})
+                _append_workspace_log(
+                    str(workspace_root_path),
+                    "tool_result",
+                    {"session_id": session_id, "tool_name": "check_sync_status", "tool_output": str(result_json)},
+                )
                 import json
                 return json.loads(result_json)
             finally:
@@ -1289,7 +1427,17 @@ if SESSION_AVAILABLE:
                 metadata = load_sync_metadata()
                 
                 # Check current status before updating so we have accurate timestamps
+                _append_workspace_log(
+                    str(workspace_root_path),
+                    "tool_call",
+                    {"session_id": session_id, "tool_name": "check_sync_status", "tool_input": {}},
+                )
                 status_raw = check_sync_status.invoke({})
+                _append_workspace_log(
+                    str(workspace_root_path),
+                    "tool_result",
+                    {"session_id": session_id, "tool_name": "check_sync_status", "tool_output": str(status_raw)},
+                )
                 status = json.loads(status_raw)
                 
                 analysis = status.get("workspace_analysis", {})
@@ -1423,7 +1571,18 @@ if SESSION_AVAILABLE:
             from server.storage import get_todos
         except ImportError:
             from storage import get_todos
-        return get_todos(session_id)
+        todos = get_todos(session_id)
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            _append_workspace_log(
+                str(_workspace_path_for_session(session)),
+                "todo_get",
+                {"session_id": session_id, "count": len(todos)},
+            )
+        except Exception:
+            pass
+        return todos
 
     @app.put("/sessions/{session_id}/todo", summary="Update session todo list")
     async def session_todo_put(session_id: str, todos: Any = Body(default_factory=list)):
@@ -1439,6 +1598,19 @@ if SESSION_AVAILABLE:
                 type(todos).__name__,
             )
         saved_todos = update_todos(session_id, safe_todos)
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            _append_workspace_log(
+                str(_workspace_path_for_session(session)),
+                "todo_put",
+                {
+                    "session_id": session_id,
+                    "count": len(saved_todos) if isinstance(saved_todos, list) else 0,
+                },
+            )
+        except Exception:
+            pass
         return saved_todos
         
     @app.post("/sessions/{session_id}/todo/generate", summary="Auto-generate todo list from context")
@@ -1453,6 +1625,11 @@ if SESSION_AVAILABLE:
                     detail="Todo generation is only allowed in edit mode."
                 )
             workspace_root_path = str(_workspace_path_for_session(session))
+            _append_workspace_log(
+                workspace_root_path,
+                "todo_generate_start",
+                {"session_id": session_id, "mode": session_mode},
+            )
             
             try:
                 from server.agent.todo_generator import generate_todos_for_session
@@ -1460,10 +1637,29 @@ if SESSION_AVAILABLE:
                 from agent.todo_generator import generate_todos_for_session
                 
             merged_todos = generate_todos_for_session(session_id, workspace_root_path)
+            _append_workspace_log(
+                workspace_root_path,
+                "todo_generate_done",
+                {
+                    "session_id": session_id,
+                    "mode": session_mode,
+                    "count": len(merged_todos) if isinstance(merged_todos, list) else 0,
+                },
+            )
             return merged_todos
         except HTTPException:
             raise
         except Exception as e:
+            try:
+                session_svc = get_session()
+                session = session_svc.get(session_id)
+                _append_workspace_log(
+                    str(_workspace_path_for_session(session)),
+                    "todo_generate_error",
+                    {"session_id": session_id, "error": str(e)},
+                )
+            except Exception:
+                pass
             raise HTTPException(status_code=500, detail=str(e))
             
     # --- GIT INTEGRATION ENDPOINTS ---
@@ -1515,9 +1711,31 @@ if SESSION_AVAILABLE:
             
             sys_prompt = "You are an expert software engineer. Write a concise, conventional git commit message summarizing this diff. Do not include markdown formatting, backticks, or extra explanation. Just the raw message string. Keep it under 72 characters."
             human_msg = f"Diff:\n{diff_text[:10000]}" # cap length for safety
+            _append_workspace_log(
+                workspace_root_path,
+                "llm_request",
+                {
+                    "session_id": session_id,
+                    "source": "git_auto_commit",
+                    "mode": str(session.get("mode", "unknown")),
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "human", "content": human_msg},
+                    ],
+                },
+            )
             
             res = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=human_msg)])
             commit_msg = str(res.content).strip().strip('`').strip('\"').strip('\'')
+            _append_workspace_log(
+                workspace_root_path,
+                "llm_response",
+                {
+                    "session_id": session_id,
+                    "source": "git_auto_commit",
+                    "content": str(res.content),
+                },
+            )
             
             if not commit_msg:
                 commit_msg = "Auto-commit from OpenScrum agent"
@@ -1530,6 +1748,16 @@ if SESSION_AVAILABLE:
             return {"success": success, "commit_message": commit_msg, "docs_sync": docs_sync}
             
         except Exception as e:
+            try:
+                session_svc = get_session()
+                session = session_svc.get(session_id)
+                _append_workspace_log(
+                    str(_workspace_path_for_session(session)),
+                    "llm_error",
+                    {"session_id": session_id, "source": "git_auto_commit", "error": str(e)},
+                )
+            except Exception:
+                pass
             raise HTTPException(status_code=500, detail=str(e))
             
     @app.post("/sessions/{session_id}/git/reject", summary="Hard reset workspace changes")
@@ -1649,22 +1877,38 @@ if SESSION_AVAILABLE:
             # Get model from environment or default
             model = os.getenv("OPENAI_MODEL", "gpt-4")
             
-            # Get all messages
-            messages = session_svc.messages(session_id=session_id)
-            
-            # Count tokens
+            # Get all messages (for total) and mode-scoped messages (for active context)
+            all_messages = session_svc.messages(session_id=session_id)
+            mode_context_start_ms = int(session.get("mode_context_start_ms") or 0)
+            if mode_context_start_ms > 0:
+                messages = []
+                for msg in all_messages:
+                    info = msg.get("info", {}) if isinstance(msg, dict) else {}
+                    ts = int((info.get("time") or {}).get("created", 0) or 0)
+                    if ts >= mode_context_start_ms:
+                        messages.append(msg)
+            else:
+                messages = all_messages
+
+            # Count tokens for active mode context
             token_count = count_message_tokens(messages, model)
+            total_token_count = count_message_tokens(all_messages, model)
             token_limit = get_token_limit(model)
             usage_percentage = round((token_count / token_limit) * 100, 1)
+            total_usage_percentage = round((total_token_count / token_limit) * 100, 1)
             should_compress_now = should_compress(token_count, model, threshold=0.8)
             
             return {
                 "token_count": token_count,
                 "token_limit": token_limit,
                 "usage_percentage": usage_percentage,
+                "total_token_count": total_token_count,
+                "total_usage_percentage": total_usage_percentage,
                 "should_compress": should_compress_now,
                 "model": model,
                 "message_count": len(messages),
+                "total_message_count": len(all_messages),
+                "mode_context_start_ms": mode_context_start_ms,
             }
         except HTTPException:
             raise
@@ -1994,6 +2238,23 @@ if SESSION_AVAILABLE:
                 # 4. Load previous messages (session returns newest first; agent needs chronological order)
                 previous_messages = list(reversed(session_svc.messages(session_id=session_id)))
                 session_mode = str(session.get("mode", "plan")).strip().lower()
+                mode_context_start_ms = int(session.get("mode_context_start_ms") or 0)
+                if mode_context_start_ms > 0:
+                    filtered_messages = []
+                    for msg in previous_messages:
+                        info = msg.get("info", {}) if isinstance(msg, dict) else {}
+                        ts = int((info.get("time") or {}).get("created", 0) or 0)
+                        if ts >= mode_context_start_ms:
+                            filtered_messages.append(msg)
+                    dropped = len(previous_messages) - len(filtered_messages)
+                    if dropped > 0:
+                        _log.info(
+                            "Mode context boundary applied: dropped %d historical messages before %d for session %s",
+                            dropped,
+                            mode_context_start_ms,
+                            session_id,
+                        )
+                    previous_messages = filtered_messages
                 
                 # 5. Resolve message (e.g. /init -> init command prompt)
                 workspace_root = session["directory"]
@@ -2176,6 +2437,23 @@ if SESSION_AVAILABLE:
                     if docs_context:
                         from langchain_core.messages import SystemMessage
                         langchain_messages.insert(0, SystemMessage(content=docs_context))
+
+                # If context was reset at mode switch, make the boundary explicit to the model.
+                if mode_context_start_ms > 0:
+                    from langchain_core.messages import SystemMessage
+                    mode_switch = session.get("mode_switch") or {}
+                    switch_from = str(mode_switch.get("from", "unknown"))
+                    switch_to = str(mode_switch.get("to", session_mode))
+                    langchain_messages.insert(
+                        0,
+                        SystemMessage(
+                            content=(
+                                "MODE CONTEXT RESET ACTIVE.\n"
+                                f"Current mode: {session_mode}. Last mode switch: {switch_from} -> {switch_to} at {mode_context_start_ms}.\n"
+                                "Ignore conversational context from before that switch and use current design docs/workspace state as source of truth."
+                            )
+                        ),
+                    )
 
                 # Add memory context as system message if found (plan mode only)
                 if memory_context:

@@ -11,8 +11,14 @@ from typing import Any, List
 
 try:
     from server.storage.storage import Storage, get_storage, NotFoundError
+    from server.workspace_log import append_workspace_log
 except ImportError:
     from storage.storage import Storage, get_storage, NotFoundError
+    try:
+        from workspace_log import append_workspace_log
+    except ImportError:
+        def append_workspace_log(*args, **kwargs):
+            return None
 
 
 def get_todos(session_id: str, storage: Storage = None) -> List[dict]:
@@ -46,6 +52,33 @@ NON_IMPLEMENTATION_PATTERNS = [
 ]
 
 _log = logging.getLogger(__name__)
+
+
+def _workspace_root_for_session(storage: Storage, session_id: str) -> str | None:
+    """
+    Resolve workspace root for a session so storage-layer todo filtering can
+    emit detailed workspace log entries.
+    """
+    # Fast path: default project id currently used by session storage.
+    try:
+        raw = storage.read(["session", "default", session_id])
+        workspace = str(raw.get("directory", "")).strip() if isinstance(raw, dict) else ""
+        if workspace:
+            return workspace
+    except Exception:
+        pass
+
+    # Fallback: scan all projects for this session id.
+    try:
+        for key in storage.list(["session"]):
+            if len(key) == 3 and key[2] == session_id:
+                raw = storage.read(key)
+                workspace = str(raw.get("directory", "")).strip() if isinstance(raw, dict) else ""
+                if workspace:
+                    return workspace
+    except Exception:
+        pass
+    return None
 
 
 def is_implementation_todo_content(content: str) -> bool:
@@ -145,12 +178,81 @@ def sanitize_todos(todos: List[dict], session_id: str | None = None) -> List[dic
     return sanitized
 
 
+def sanitize_todos_with_report(todos: List[dict], session_id: str | None = None) -> tuple[List[dict], List[dict]]:
+    """Normalize todos, returning (sanitized, filtered_report)."""
+    if not isinstance(todos, list):
+        return [], [{
+            "reason": "invalid_payload_type",
+            "item_type": type(todos).__name__,
+            "item": todos,
+        }]
+
+    sanitized: List[dict] = []
+    filtered: List[dict] = []
+    next_id = 1
+    for raw in todos:
+        if not isinstance(raw, dict):
+            reason = "invalid_item_type"
+            _log.warning(
+                "Filtered todo item for session %s: reason=%s type=%s item=%r",
+                session_id or "-",
+                reason,
+                type(raw).__name__,
+                raw,
+            )
+            filtered.append({"reason": reason, "item_type": type(raw).__name__, "item": raw})
+            continue
+
+        content = str(raw.get("content", "")).strip()
+        rejection_reason = todo_rejection_reason(content)
+        if rejection_reason is not None:
+            _log.warning(
+                "Filtered todo item for session %s: reason=%s content=%r",
+                session_id or "-",
+                rejection_reason,
+                content,
+            )
+            filtered.append({"reason": rejection_reason, "content": content, "item": raw})
+            continue
+
+        item = _normalize_todo_item(raw, fallback_id=next_id)
+        if item is None:
+            reason = "normalization_failed"
+            _log.warning(
+                "Filtered todo item for session %s: reason=%s item=%r",
+                session_id or "-",
+                reason,
+                raw,
+            )
+            filtered.append({"reason": reason, "item": raw})
+            continue
+
+        sanitized.append(item)
+        try:
+            next_id = max(next_id + 1, int(item["id"]) + 1)
+        except ValueError:
+            next_id += 1
+    return sanitized, filtered
+
+
 def update_todos(session_id: str, todos: List[dict], storage: Storage = None) -> List[dict]:
     """
     Save todo list for a session.
     Each item should have: id, content, status (pending|in_progress|completed|cancelled), priority (high|medium|low).
     """
     s = storage or get_storage()
-    sanitized = sanitize_todos(todos, session_id=session_id)
+    sanitized, filtered = sanitize_todos_with_report(todos, session_id=session_id)
     s.write(["todo", session_id], sanitized)
+    if filtered:
+        workspace_root = _workspace_root_for_session(s, session_id)
+        if workspace_root:
+            for entry in filtered:
+                append_workspace_log(
+                    workspace_root,
+                    "todo_filtered",
+                    {
+                        "session_id": session_id,
+                        **entry,
+                    },
+                )
     return sanitized

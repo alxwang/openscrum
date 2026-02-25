@@ -184,7 +184,21 @@ export function useApiClient() {
       // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) {
+          // Flush any trailing buffered SSE line (e.g. final done chunk without trailing newline)
+          const tail = buffer.trim()
+          if (tail.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(tail.slice(6))
+              if (onChunk) {
+                await onChunk(data)
+              }
+            } catch (e) {
+              console.error('Failed to parse trailing SSE chunk:', e, tail)
+            }
+          }
+          break
+        }
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')

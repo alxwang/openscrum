@@ -9,6 +9,14 @@ from langchain_openai import ChatOpenAI
 from .graph import AgentState
 
 _log = logging.getLogger(__name__)
+try:
+    from server.workspace_log import append_workspace_log
+except ImportError:
+    try:
+        from workspace_log import append_workspace_log
+    except ImportError:
+        def append_workspace_log(*args, **kwargs):
+            return None
 
 
 def _render_recent_activity(messages: list, limit: int = 20) -> str:
@@ -71,6 +79,7 @@ def todo_tracker_node(state: AgentState) -> Dict[str, Any]:
     if not ctx or len(ctx) == 0:
         return {}
     session_id = ctx[0]
+    workspace_root = ctx[1] if len(ctx) > 1 else ""
     if not session_id:
         return {}
         
@@ -115,10 +124,33 @@ You MUST output EXACTLY this JSON format:
         _log.info(f"[TodoTracker] Analyzing progress with {model_name}...")
         rendered_system = sys_prompt.format(current_todos=json.dumps(current_todos, indent=2))
         rendered_human = f"Recent conversation activity:\n{recent_activity}"
+        append_workspace_log(
+            workspace_root,
+            "llm_request",
+            {
+                "session_id": session_id,
+                "source": "todo_tracker",
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": rendered_system},
+                    {"role": "human", "content": rendered_human},
+                ],
+            },
+        )
         res = llm.invoke([
             SystemMessage(content=rendered_system),
             HumanMessage(content=rendered_human),
         ])
+        append_workspace_log(
+            workspace_root,
+            "llm_response",
+            {
+                "session_id": session_id,
+                "source": "todo_tracker",
+                "model": model_name,
+                "content": str(res.content),
+            },
+        )
         
         data = json.loads(str(res.content))
         new_todos = data.get("todos", current_todos)
@@ -151,4 +183,13 @@ You MUST output EXACTLY this JSON format:
         
     except Exception as e:
         _log.error(f"[TodoTracker] Failed to track progress: {e}")
+        append_workspace_log(
+            workspace_root,
+            "llm_error",
+            {
+                "session_id": session_id,
+                "source": "todo_tracker",
+                "error": str(e),
+            },
+        )
         return {}

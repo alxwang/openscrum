@@ -62,6 +62,40 @@ def ensure_in_workspace(path: Path) -> None:
         raise ValueError(f"Path {path} is outside workspace root {get_workspace_root()}")
 
 
+def _read_text_if_exists(path: Path) -> Optional[str]:
+    """Read UTF-8 text content if a file exists, otherwise None."""
+    if not path.exists() or not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8")
+
+
+def _confirm_file_text_changed(
+    path: Path,
+    before_text: Optional[str],
+    expected_after_text: Optional[str] = None,
+    operation: str = "update",
+) -> Optional[str]:
+    """
+    Confirm a text-file mutation actually changed persisted content.
+    Returns None when verification passes, otherwise an error string.
+    """
+    after_text = _read_text_if_exists(path)
+
+    if expected_after_text is not None and after_text != expected_after_text:
+        return (
+            f"Error: {operation} verification failed for {path}. "
+            "Persisted content does not match expected output."
+        )
+
+    if before_text == after_text:
+        return (
+            f"Error: {operation} verification failed for {path}. "
+            "No file-content change detected."
+        )
+
+    return None
+
+
 # ============================================================================
 # File Operations
 # ============================================================================
@@ -155,6 +189,7 @@ def write(
     try:
         resolved_path = resolve_path(file_path)
         ensure_in_workspace(resolved_path)
+        before_text = _read_text_if_exists(resolved_path)
         
         # Create parent directories if needed
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +200,15 @@ def write(
         # Write the file
         with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(content)
+
+        verify_err = _confirm_file_text_changed(
+            resolved_path,
+            before_text,
+            expected_after_text=content,
+            operation="write",
+        )
+        if verify_err:
+            return verify_err
         
         relative_path = resolved_path.relative_to(Path(get_workspace_root()))
         return f"Wrote file successfully: {relative_path}"
@@ -204,6 +248,7 @@ def edit(
         # Read current content
         with open(resolved_path, 'r', encoding='utf-8') as f:
             content = f.read()
+        before_text = content
         
         # Perform replacement
         if replace_all:
@@ -220,6 +265,15 @@ def edit(
         # Write back
         with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
+
+        verify_err = _confirm_file_text_changed(
+            resolved_path,
+            before_text,
+            expected_after_text=new_content,
+            operation="edit",
+        )
+        if verify_err:
+            return verify_err
         
         relative_path = resolved_path.relative_to(Path(get_workspace_root()))
         return f"Edit applied successfully: {relative_path}"
@@ -645,6 +699,15 @@ def multiedit(
         # Write back
         with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(content)
+
+        verify_err = _confirm_file_text_changed(
+            resolved_path,
+            original_content,
+            expected_after_text=content,
+            operation="multiedit",
+        )
+        if verify_err:
+            return verify_err
         
         relative_path = resolved_path.relative_to(Path(get_workspace_root()))
         return f"MultiEdit applied successfully: {len(edits)} edits to {relative_path}"
@@ -695,6 +758,7 @@ def apply_patch(patch_text: str = Field(..., description="The full patch text th
                 file_path = line.replace("*** Add File:", "").strip()
                 resolved_path = resolve_path(file_path)
                 ensure_in_workspace(resolved_path)
+                before_text = _read_text_if_exists(resolved_path)
                 
                 # Collect content (lines starting with +)
                 content_lines = []
@@ -709,6 +773,14 @@ def apply_patch(patch_text: str = Field(..., description="The full patch text th
                 resolved_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(resolved_path, 'w', encoding='utf-8') as f:
                     f.write(content)
+                verify_err = _confirm_file_text_changed(
+                    resolved_path,
+                    before_text,
+                    expected_after_text=content,
+                    operation="apply_patch(add)",
+                )
+                if verify_err:
+                    return verify_err
                 results.append(f"Added: {file_path}")
             
             elif line.startswith("*** Update File:"):
@@ -722,6 +794,7 @@ def apply_patch(patch_text: str = Field(..., description="The full patch text th
                 # Read current content
                 with open(resolved_path, 'r', encoding='utf-8') as f:
                     content = f.read()
+                before_text = content
                 
                 # Simple patch application (look for @@ markers and apply changes)
                 i += 1
@@ -746,6 +819,14 @@ def apply_patch(patch_text: str = Field(..., description="The full patch text th
                 
                 with open(resolved_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
+                verify_err = _confirm_file_text_changed(
+                    resolved_path,
+                    before_text,
+                    expected_after_text=new_content,
+                    operation="apply_patch(update)",
+                )
+                if verify_err:
+                    return verify_err
                 results.append(f"Updated: {file_path}")
             
             elif line.startswith("*** Delete File:"):
@@ -754,8 +835,15 @@ def apply_patch(patch_text: str = Field(..., description="The full patch text th
                 ensure_in_workspace(resolved_path)
                 
                 if resolved_path.exists():
+                    before_text = _read_text_if_exists(resolved_path)
                     resolved_path.unlink()
+                    if resolved_path.exists():
+                        return f"Error: apply_patch(delete) verification failed for {file_path}. File still exists."
+                    if before_text is None:
+                        return f"Error: apply_patch(delete) verification failed for {file_path}. File had no readable content before delete."
                     results.append(f"Deleted: {file_path}")
+                else:
+                    return f"Error: apply_patch(delete) verification failed for {file_path}. File did not exist."
             
             i += 1
         
@@ -1308,7 +1396,22 @@ def design_write(doc_type: str, content: str) -> str:
         return f"Error: Unknown document type '{doc_type}'. Available types: {available}"
     
     manager = DesignDocumentManager(workspace_root)
+    before_content = manager.read_document(doc_type) or ""
     doc_path = manager.write_document(doc_type, content)
+    after_content = manager.read_document(doc_type) or ""
+    if after_content != content:
+        return (
+            f"Error: design_write verification failed for '{doc_type}'. "
+            "Persisted content does not match requested content."
+        )
+    if before_content == after_content and after_content != content:
+        return (
+            f"Error: design_write verification failed for '{doc_type}'. "
+            "No content change detected."
+        )
+    if before_content == after_content == content:
+        _log.info(f"[design_write] No-op write for {doc_type}; document already up to date at: {doc_path}")
+        return f"✓ {DESIGN_DOC_TYPES[doc_type]['name']} document already up to date at: {doc_path}"
     
     _log.info(f"[design_write] Wrote {len(content)} chars to: {doc_path}")
     
@@ -1379,83 +1482,10 @@ def design_update_section(doc_type: str, section: str, content: str) -> str:
     Returns:
         Confirmation message
     """
-    import logging
-    _log = logging.getLogger(__name__)
-    
-    from server.design_docs import DesignDocumentManager, DESIGN_DOC_TYPES
-    
-    workspace_root = get_workspace_root()
-    if not workspace_root:
-        return "Error: No workspace context available"
-    
-    _log.info(f"[design_update_section] workspace_root={workspace_root}, doc_type={doc_type}, section={section}, content_length={len(content)}")
-    
-    if doc_type not in DESIGN_DOC_TYPES:
-        available = ", ".join(DESIGN_DOC_TYPES.keys())
-        return f"Error: Unknown document type '{doc_type}'. Available types: {available}"
-    
-    manager = DesignDocumentManager(workspace_root)
-    doc_path = manager.get_doc_path(doc_type)
-    before = manager.read_document(doc_type) or ""
-    manager.update_section(doc_type, section, content)
-    after = manager.read_document(doc_type) or ""
-
-    if before == after:
-        heading_re = re.compile(r'^\s{0,3}#{1,6}\s+(.*?)\s*$')
-        headings = []
-        for line in before.splitlines():
-            m = heading_re.match(line)
-            if m:
-                headings.append(m.group(1).strip())
-        _log.warning(
-            "[design_update_section] No file-content change detected for %s (section=%s, path=%s). headings=%s content_preview=%r",
-            doc_type, section, doc_path, headings[:20], content[:200],
-        )
-        return (
-            f"Error: Section update reported no content change for '{section}'. "
-            f"Document path: {doc_path}\n"
-            f"Known headings: {headings[:20]}"
-        )
-
-    _log.info(
-        "[design_update_section] Updated section '%s' in %s at %s (before=%d chars, after=%d chars)",
-        section, doc_type, doc_path, len(before), len(after),
-    )
-
-    # Build a compact preview of changed lines for immediate verification.
-    before_lines = before.splitlines()
-    after_lines = after.splitlines()
-    diff_lines = list(
-        difflib.unified_diff(
-            before_lines,
-            after_lines,
-            fromfile="before",
-            tofile="after",
-            lineterm="",
-        )
-    )
-    # Keep only real additions/removals, skip headers/hunks
-    changed = [ln for ln in diff_lines if (ln.startswith("+") or ln.startswith("-")) and not ln.startswith("+++") and not ln.startswith("---")]
-    preview_lines = changed[:20]
-    # ANSI colors for terminal-friendly diff readability.
-    RED = "\x1b[31m"
-    GREEN = "\x1b[32m"
-    RESET = "\x1b[0m"
-    colored_preview_lines = []
-    for ln in preview_lines:
-        if ln.startswith("+"):
-            colored_preview_lines.append(f"{GREEN}{ln}{RESET}")
-        elif ln.startswith("-"):
-            colored_preview_lines.append(f"{RED}{ln}{RESET}")
-        else:
-            colored_preview_lines.append(ln)
-    preview = "\n".join(colored_preview_lines)
-    if len(changed) > len(preview_lines):
-        preview += f"\n... ({len(changed) - len(preview_lines)} more changed lines)"
-    
     return (
-        f"✓ Updated section '{section}' in {DESIGN_DOC_TYPES[doc_type]['name']} document "
-        f"at: {doc_path}\n\nChange preview:\n{preview if preview else '(unable to compute line preview)'}"
+        "Error: design_update_section is deprecated. "
+        "Use design_read to fetch the full document, update content in-memory, "
+        "then save the complete document with design_write."
     )
 
 
@@ -2074,7 +2104,6 @@ __all__ = [
     'design_read',
     'design_write',
     'design_list',
-    'design_update_section',
     'plan_exit',
     'plan_enter',
     'analyze_workspace',

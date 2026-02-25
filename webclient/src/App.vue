@@ -359,12 +359,18 @@
                       placeholder="Search logs..."
                       class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-gray-300"
                     />
-                    <button
-                      @click="loadWorkspaceLog(true)"
-                      class="px-2 py-1 text-xs rounded bg-gray-100 hover:bg-gray-200 border border-gray-300 flex-shrink-0"
-                    >
-                      Refresh
-                    </button>
+                    <div class="flex flex-col items-end gap-0.5 flex-shrink-0">
+                      <button
+                        @click="handleRefreshWorkspaceLog"
+                        class="px-2 py-1 text-xs rounded bg-gray-100 hover:bg-gray-200 border border-gray-300"
+                      >
+                        Refresh
+                      </button>
+                      <span class="text-[10px] text-gray-600">
+                        Last: {{ formatRefreshTimestamp(lastWorkspaceLogRefreshTs) }}
+                      </span>
+                    </div>
+                    <span v-if="copiedLogEntry" class="text-[11px] text-green-700 flex-shrink-0">Copied</span>
                   </div>
                   <div v-if="!detailedLoggingEnabled" class="p-3 text-xs text-gray-700">
                     Detailed log is disabled. Start backend with <code>--log</code>.
@@ -376,18 +382,71 @@
                     <div v-if="displayWorkspaceLogEntries.length === 0" class="p-2 text-gray-600">
                       No log entries yet.
                     </div>
-                    <div
-                      v-for="(entry, idx) in displayWorkspaceLogEntries"
-                      :key="`${entry.timestamp_ms || idx}-${entry.event || 'unknown'}-${idx}`"
-                      class="mb-2 rounded border"
-                      :class="eventCardClass(entry.event)"
-                    >
-                      <div class="px-2 py-1 border-b flex items-center justify-between" :class="eventHeaderClass(entry.event)">
-                        <span class="font-semibold">{{ entry.event || 'unknown' }}</span>
-                        <span class="text-[11px]">{{ formatLogTimestamp(entry.timestamp_ms) }}</span>
+                    <template v-for="(row, idx) in displayWorkspaceLogRows" :key="`log-row-${idx}`">
+                      <div v-if="row.type === 'divider'" ref="logRefreshDividerRef" class="my-3 px-1">
+                        <div class="flex items-center gap-2">
+                          <div class="h-0.5 flex-1 bg-orange-500"></div>
+                          <span class="text-[10px] font-bold text-orange-900 bg-orange-100 border border-orange-400 rounded px-2 py-0.5 whitespace-nowrap shadow-sm">
+                            NEW ABOVE · EXISTING BELOW
+                          </span>
+                          <div class="h-0.5 flex-1 bg-orange-500"></div>
+                        </div>
                       </div>
-                      <pre class="m-0 p-2 whitespace-pre-wrap break-words">{{ prettyLogEntry(entry) }}</pre>
-                    </div>
+
+                      <div
+                        v-else
+                        class="mb-2 rounded border cursor-pointer hover:opacity-90 transition-opacity"
+                        :class="eventCardClass(row.entry.event)"
+                        @dblclick="copyLogEntryToClipboard(row.entry)"
+                        title="Double-click to copy JSON"
+                      >
+                        <div class="px-2 py-1 border-b flex items-center justify-between" :class="eventHeaderClass(row.entry.event)">
+                          <span class="font-semibold">{{ row.entry.event || 'unknown' }}</span>
+                          <span class="text-[11px]">{{ formatLogTimestamp(row.entry.timestamp_ms) }}</span>
+                        </div>
+                        <div class="p-2 space-y-2">
+                          <div class="text-[12px] font-medium text-gray-900 break-words">
+                            {{ logPrimaryText(row.entry) }}
+                          </div>
+                          <div v-if="logSecondaryText(row.entry)" class="text-[11px] text-gray-700 break-words">
+                            {{ logSecondaryText(row.entry) }}
+                          </div>
+
+                          <div v-if="logMetaItems(row.entry).length > 0" class="flex flex-wrap gap-1">
+                            <span
+                              v-for="item in logMetaItems(row.entry)"
+                              :key="`${row.entry.timestamp_ms || idx}-${item.label}-${item.value}`"
+                              class="px-1.5 py-0.5 rounded border text-[10px] bg-white/80 text-gray-700 border-gray-300"
+                            >
+                              {{ item.label }}: {{ item.value }}
+                            </span>
+                          </div>
+
+                          <div v-if="logToolCalls(row.entry).length > 0" class="rounded border border-gray-300 bg-white p-2">
+                            <div class="text-[11px] font-semibold text-gray-800 mb-1">Tool Calls</div>
+                            <div
+                              v-for="(tc, tcIdx) in logToolCalls(row.entry)"
+                              :key="`${row.entry.timestamp_ms || idx}-tc-${tc.id || tcIdx}`"
+                              class="mb-1 last:mb-0"
+                            >
+                              <div class="text-[11px] text-gray-800 break-words">
+                                {{ tc.name || 'unknown' }}
+                                <span v-if="tc.id" class="text-gray-500">({{ tc.id }})</span>
+                              </div>
+                              <pre
+                                v-if="tc.args && Object.keys(tc.args).length > 0"
+                                class="mt-1 m-0 p-1 rounded bg-gray-50 border border-gray-200 text-[10px] whitespace-pre-wrap break-words"
+                              >{{ JSON.stringify(tc.args, null, 2) }}</pre>
+                            </div>
+                          </div>
+
+                          <details class="rounded border border-gray-300 bg-white">
+                            <summary class="px-2 py-1 text-[11px] text-gray-700 select-none">Raw JSON</summary>
+                            <pre class="m-0 p-2 whitespace-pre-wrap break-words border-t border-gray-200">{{ prettyLogEntry(row.entry) }}</pre>
+                          </details>
+                        </div>
+                      </div>
+                    </template>
                   </div>
                 </div>
               </div>
@@ -606,9 +665,14 @@ const activeEditTab = ref('console')
 const agentRulesContent = ref('')
 const workspaceLogContent = ref('')
 const isLoadingWorkspaceLog = ref(false)
+const lastWorkspaceLogRefreshTs = ref(null)
+const logNewEntriesAfterTs = ref(null)
+const pendingScrollToLogDivider = ref(false)
+const logRefreshDividerRef = ref(null)
 const logOrder = ref('new') // 'new' | 'old'
 const logEventFilter = ref('all')
 const logKeywordFilter = ref('')
+const copiedLogEntry = ref(false)
 
 const parsedWorkspaceLogEntries = computed(() => {
   const raw = workspaceLogContent.value || ''
@@ -659,6 +723,33 @@ const displayWorkspaceLogEntries = computed(() => {
   return rows
 })
 
+const displayWorkspaceLogRows = computed(() => {
+  const entries = displayWorkspaceLogEntries.value || []
+  if (!entries.length) return []
+
+  const cutoffTs = Number(logNewEntriesAfterTs.value || 0)
+  if (!cutoffTs) {
+    return entries.map(entry => ({ type: 'entry', entry }))
+  }
+
+  const rows = []
+  let dividerInserted = false
+  for (const entry of entries) {
+    const ts = Number(entry?.timestamp_ms || 0)
+    if (!dividerInserted) {
+      const crossedBoundary =
+        (logOrder.value === 'new' && ts <= cutoffTs) ||
+        (logOrder.value === 'old' && ts > cutoffTs)
+      if (crossedBoundary) {
+        rows.push({ type: 'divider' })
+        dividerInserted = true
+      }
+    }
+    rows.push({ type: 'entry', entry })
+  }
+  return rows
+})
+
 const toggleLogOrder = () => {
   logOrder.value = logOrder.value === 'new' ? 'old' : 'new'
 }
@@ -666,6 +757,12 @@ const toggleLogOrder = () => {
 const formatLogTimestamp = (ts) => {
   const n = Number(ts || 0)
   if (!n) return '-'
+  return new Date(n).toLocaleString()
+}
+
+const formatRefreshTimestamp = (ts) => {
+  const n = Number(ts || 0)
+  if (!n) return 'never'
   return new Date(n).toLocaleString()
 }
 
@@ -699,10 +796,144 @@ const eventHeaderClass = (event) => {
   return map[event] || 'bg-zinc-100 border-zinc-200'
 }
 
+const truncateText = (value, max = 220) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length > max ? `${text.slice(0, max)}...` : text
+}
+
+const extractLastRoleContent = (entry, role) => {
+  const msgs = Array.isArray(entry?.messages) ? entry.messages : []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const msg = msgs[i]
+    if (String(msg?.role || '').toLowerCase() === role) {
+      return msg
+    }
+  }
+  return null
+}
+
+const logToolCalls = (entry) => {
+  if (!entry || typeof entry !== 'object') return []
+  if (Array.isArray(entry.tool_calls)) return entry.tool_calls
+  if (entry.event === 'llm_request') {
+    const lastAi = extractLastRoleContent(entry, 'ai')
+    if (Array.isArray(lastAi?.tool_calls)) return lastAi.tool_calls
+  }
+  return []
+}
+
+const getToolResultText = (entry) => {
+  if (!entry || typeof entry !== 'object') return ''
+  const preferred = [
+    entry.tool_output,
+    entry.output,
+    entry.result,
+    entry.content,
+    entry.error,
+  ]
+  for (const v of preferred) {
+    if (v !== undefined && v !== null && String(v).trim()) {
+      return String(v)
+    }
+  }
+  return ''
+}
+
+const logPrimaryText = (entry) => {
+  const event = String(entry?.event || '')
+  if (event === 'user_message') return truncateText(entry?.content || entry?.message || '(empty user message)')
+  if (event === 'llm_response') return truncateText(entry?.content || '(empty model response)')
+  if (event === 'llm_request') {
+    const userMsg = extractLastRoleContent(entry, 'human')
+    return truncateText(userMsg?.content || 'LLM request')
+  }
+  if (event === 'tool_call') {
+    const tool = entry?.tool_name || 'unknown'
+    return `Call ${tool}`
+  }
+  if (event === 'tool_result') {
+    const tool = entry?.tool_name || 'unknown'
+    const output = truncateText(getToolResultText(entry), 180)
+    return output ? `Result ${tool}: ${output}` : `Result ${tool}`
+  }
+  if (event === 'agent_stream_error') return truncateText(entry?.error || entry?.content || 'Stream error')
+  return truncateText(entry?.content || JSON.stringify(entry))
+}
+
+const logSecondaryText = (entry) => {
+  const event = String(entry?.event || '')
+  if (event === 'llm_request') {
+    const lastAi = extractLastRoleContent(entry, 'ai')
+    const aiPreview = truncateText(lastAi?.content, 280)
+    return aiPreview ? `Last AI draft: ${aiPreview}` : ''
+  }
+  if (event === 'tool_call') {
+    const input = entry?.tool_input
+    if (input && Object.keys(input).length > 0) {
+      return `Input: ${truncateText(JSON.stringify(input), 280)}`
+    }
+    return ''
+  }
+  if (event === 'tool_result') {
+    if (entry?.error) return truncateText(String(entry.error), 280)
+    return ''
+  }
+  return ''
+}
+
+const logMetaItems = (entry) => {
+  const items = []
+  const push = (label, value) => {
+    const text = String(value ?? '').trim()
+    if (text) items.push({ label, value: text })
+  }
+
+  push('session', entry?.session_id)
+  push('mode', entry?.mode)
+  push('tool', entry?.tool_name)
+  push('call_id', entry?.call_id)
+  push('status', entry?.status)
+  if (Array.isArray(entry?.messages)) push('messages', entry.messages.length)
+  const tc = logToolCalls(entry)
+  if (tc.length > 0) push('tool_calls', tc.length)
+  if (typeof entry?.duration_ms === 'number') push('duration', `${entry.duration_ms}ms`)
+  if (typeof entry?.elapsed_ms === 'number') push('elapsed', `${entry.elapsed_ms}ms`)
+  if (typeof entry?.token_usage?.total_tokens === 'number') push('tokens', entry.token_usage.total_tokens)
+  return items.slice(0, 8)
+}
+
 const prettyLogEntry = (entry) => {
   if (!entry || typeof entry !== 'object') return String(entry || '')
   const clone = { ...entry }
+  if (clone.event === 'llm_request' && Array.isArray(clone.messages)) {
+    const msgs = clone.messages
+    const count = clone.messages.length
+    const lastAi = [...msgs].reverse().find(m => String(m?.role || '').toLowerCase() === 'ai')
+    if (lastAi) {
+      const aiContent = String(lastAi.content || '')
+      clone.latest_ai_content_preview = aiContent.length > 500 ? `${aiContent.slice(0, 500)}...` : aiContent
+      if (Array.isArray(lastAi.tool_calls) && lastAi.tool_calls.length > 0) {
+        clone.latest_ai_tool_calls = lastAi.tool_calls
+      }
+    }
+    clone.messages = '...'
+    clone.messages_count = count
+  }
   return JSON.stringify(clone, null, 2)
+}
+
+const copyLogEntryToClipboard = async (entry) => {
+  try {
+    const text = prettyLogEntry(entry)
+    await navigator.clipboard.writeText(text)
+    copiedLogEntry.value = true
+    setTimeout(() => {
+      copiedLogEntry.value = false
+    }, 1200)
+  } catch (error) {
+    console.error('Failed to copy log entry:', error)
+  }
 }
 
 // Computed property to check if any design docs actually exist
@@ -2181,13 +2412,39 @@ const loadWorkspaceLog = async (force = false) => {
   }
   if (isLoadingWorkspaceLog.value && !force) return
   isLoadingWorkspaceLog.value = true
+  const previousMaxTs = parsedWorkspaceLogEntries.value.reduce((max, entry) => {
+    const ts = Number(entry?.timestamp_ms || 0)
+    return ts > max ? ts : max
+  }, 0)
   try {
     await getWorkspaceLoggingStatus(sessionId.value)
     const data = await getWorkspaceLogContent(sessionId.value, 800)
     workspaceLogContent.value = data.content || ''
+    lastWorkspaceLogRefreshTs.value = Date.now()
+    if (force) {
+      logNewEntriesAfterTs.value = previousMaxTs || null
+      pendingScrollToLogDivider.value = true
+    }
+    if (pendingScrollToLogDivider.value) {
+      await nextTick()
+      const dividerEl = Array.isArray(logRefreshDividerRef.value)
+        ? logRefreshDividerRef.value[0]
+        : logRefreshDividerRef.value
+      if (dividerEl && typeof dividerEl.scrollIntoView === 'function') {
+        dividerEl.scrollIntoView({ behavior: 'auto', block: 'start' })
+        setTimeout(() => {
+          dividerEl.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }, 60)
+      }
+      pendingScrollToLogDivider.value = false
+    }
   } finally {
     isLoadingWorkspaceLog.value = false
   }
+}
+
+const handleRefreshWorkspaceLog = async () => {
+  await loadWorkspaceLog(true)
 }
 
 const switchToAdditionalTab = async () => {
@@ -2689,6 +2946,11 @@ const sendMessage = async () => {
       content: `**Error:** ${error.message}`,
     })
   } finally {
+    // Fallback: if stream ended without an explicit done/error chunk, clear thinking state.
+    if (sessionState.value !== 'idle' || isThinking.value) {
+      updateSessionState('idle', false)
+    }
+
     if (activeTodoExecution.value?.id) {
       pendingTodoReview.value = { ...activeTodoExecution.value }
       activeTodoExecution.value = null
