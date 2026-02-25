@@ -8,6 +8,8 @@ const STORAGE_KEY = 'openscrum_session_id'
 
 const sessionId = ref(null)
 const modelName = ref('')
+const detailedLoggingEnabled = ref(false)
+const workspaceLogFilename = ref('openscrum-detailed-log.jsonl')
 
 // AbortController for canceling ongoing requests
 let currentAbortController = null
@@ -46,6 +48,8 @@ export function useApiClient() {
     try {
       const response = await client.get('/health')
       modelName.value = response.data.model || 'unknown'
+      detailedLoggingEnabled.value = !!response.data.detailed_logging
+      workspaceLogFilename.value = response.data.workspace_log_filename || workspaceLogFilename.value
       return response.data
     } catch (error) {
       console.error('Health check failed:', error)
@@ -301,6 +305,36 @@ export function useApiClient() {
     }
   }
 
+  const getWorkspaceLoggingStatus = async (id) => {
+    try {
+      const response = await client.get(`/sessions/${id}/workspace/logging`)
+      return response.data
+    } catch (error) {
+      console.error('Failed to get workspace logging status:', error)
+      return {
+        enabled: false,
+        file_name: workspaceLogFilename.value,
+        path: '',
+        exists: false,
+        size_bytes: 0,
+      }
+    }
+  }
+
+  const getWorkspaceLogContent = async (id, lines = 400) => {
+    try {
+      const response = await client.get(`/sessions/${id}/workspace/logging/content`, { params: { lines } })
+      return response.data
+    } catch (error) {
+      console.error('Failed to get workspace log content:', error)
+      return {
+        enabled: false,
+        path: '',
+        content: '',
+      }
+    }
+  }
+
   const analyzeWorkspace = async (id) => {
     try {
       const response = await client.get(`/sessions/${id}/workspace/analyze`)
@@ -462,6 +496,8 @@ export function useApiClient() {
     resetSession,
     abortSession,
     getTokenUsage,
+    getWorkspaceLoggingStatus,
+    getWorkspaceLogContent,
     analyzeWorkspace,
     fetchSyncStatus,
     triggerWorkspaceSync,
@@ -476,5 +512,7 @@ export function useApiClient() {
     rejectGitChanges,
     sessionId,
     modelName,
+    detailedLoggingEnabled,
+    workspaceLogFilename,
   }
 }

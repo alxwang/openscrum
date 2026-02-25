@@ -48,9 +48,11 @@ BASE_URL="${OPENSCRUM_URL:-http://localhost:$PORT}"
 # Parse options (don't pass these to the client)
 RESTART=0
 KILL_ONLY=0
+ENABLE_DETAILED_LOG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --restart|-r) RESTART=1; shift ;;
+    --log) ENABLE_DETAILED_LOG=1; shift ;;
     --kill-backend|--stop-backend|--stop)
       # Stop the backend server and exit without starting TUI.
       KILL_ONLY=1
@@ -61,6 +63,7 @@ while [ $# -gt 0 ]; do
       echo "  Run from your project directory; that directory is the workspace root."
       echo "  Options:"
       echo "    --restart, -r   Restart the backend server (kill existing, then start)"
+      echo "    --log           Enable detailed workspace logging (saved to workspace root)"
       echo "    --kill-backend  Stop the backend server on OPENSCRUM_PORT (default 8000) and exit"
       echo "    --help, -h      Show this help"
       echo "  Requires: mamba activate openscrum (or conda env openscrum)"
@@ -70,6 +73,10 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+
+if [ "$ENABLE_DETAILED_LOG" = 1 ]; then
+  export OPENSCRUM_DETAILED_LOG=1
+fi
 
 # Check if backend is already up
 backend_up() {
@@ -126,6 +133,10 @@ if ! backend_up; then
     exit 1
   fi
   echo "Backend ready."
+elif [ "$ENABLE_DETAILED_LOG" = 1 ]; then
+  if ! curl -sf --max-time 2 "${BASE_URL}/health" | grep -q '"detailed_logging":true'; then
+    echo "Backend is already running without detailed logging. Use --restart --log to enable it."
+  fi
 fi
 
 exec python -m client.tui "$BASE_URL" "$@"

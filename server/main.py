@@ -6,6 +6,7 @@ Loads ~/.env for OPENAI_API_KEY, OPENAI_MODEL, etc. when present.
 """
 
 import asyncio
+import argparse
 import logging
 import os
 import json
@@ -120,6 +121,65 @@ WORKSPACE_ROOT = os.getenv("OPENSCRUM_WORKSPACE_ROOT", os.getcwd())
 # Prefer OPENAI_MODEL from ~/.env when using OpenAI; fall back to OPENSCRUM_MODEL
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL") or os.getenv("OPENSCRUM_MODEL", "gpt-5-mini")
 DEFAULT_PROVIDER = os.getenv("OPENSCRUM_PROVIDER", "openai")  # "openai" or "anthropic"
+WORKSPACE_LOG_FILENAME = "openscrum-detailed-log.jsonl"
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    value = str(os.getenv(name, default)).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+DETAILED_LOGGING_ENABLED = _env_truthy("OPENSCRUM_DETAILED_LOG", "0")
+
+
+def _workspace_log_path(workspace_root: str) -> Path:
+    return Path(workspace_root) / WORKSPACE_LOG_FILENAME
+
+
+def _serialize_langchain_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for msg in messages:
+        role = getattr(msg, "type", msg.__class__.__name__).lower()
+        entry: dict[str, Any] = {
+            "role": role,
+            "content": str(getattr(msg, "content", "") or ""),
+        }
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            normalized = []
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    normalized.append({
+                        "id": str(tc.get("id", "")),
+                        "name": str(tc.get("name", "")),
+                        "args": tc.get("args", {}),
+                    })
+                else:
+                    normalized.append({
+                        "id": str(getattr(tc, "id", "")),
+                        "name": str(getattr(tc, "name", "")),
+                        "args": getattr(tc, "args", {}),
+                    })
+            entry["tool_calls"] = normalized
+        serialized.append(entry)
+    return serialized
+
+
+def _append_workspace_log(workspace_root: str, event: str, payload: dict[str, Any]) -> None:
+    if not DETAILED_LOGGING_ENABLED:
+        return
+    try:
+        path = _workspace_log_path(workspace_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp_ms": int(time.time() * 1000),
+            "event": event,
+            **payload,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to write workspace log: %s", e)
 
 
 # ============================================================================
@@ -508,6 +568,11 @@ async def stream_agent_response_with_save(
         JSON strings of ChatChunk objects in Server-Sent Events format
     """
     _log = logging.getLogger(__name__)
+    _append_workspace_log(
+        workspace_root,
+        "agent_stream_start",
+        {"session_id": session_id, "user_message_id": user_message_id},
+    )
     
     if not SESSION_AVAILABLE:
         # Fallback to non-saving stream
@@ -667,6 +732,17 @@ async def stream_agent_response_with_save(
                             }
                             session_svc.update_part(part)
                             _log.info(f"[Tool Call] {_name} with args: {str(args)[:200]}")
+                            _append_workspace_log(
+                                workspace_root,
+                                "tool_call",
+                                {
+                                    "session_id": session_id,
+                                    "message_id": assistant_message_id,
+                                    "call_id": call_id,
+                                    "tool_name": _name,
+                                    "tool_input": args,
+                                },
+                            )
                             chat_chunk = ChatChunk(
                                 type="tool_call",
                                 tool_name=_name,
@@ -679,6 +755,17 @@ async def stream_agent_response_with_save(
                         tool_name = getattr(message, 'name', tool_calls_saved.get(call_id, {}).get("name", "unknown"))
                         tool_output = str(message.content)
                         _log.info(f"[Tool Result] {tool_name} returned: {tool_output[:200]}")
+                        _append_workspace_log(
+                            workspace_root,
+                            "tool_result",
+                            {
+                                "session_id": session_id,
+                                "message_id": assistant_message_id,
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "tool_output": tool_output,
+                            },
+                        )
                         storage = get_storage()
                         for part_key in storage.list(["part", assistant_message_id]):
                             try:
@@ -756,6 +843,15 @@ async def stream_agent_response_with_save(
         
         # Send the complete final content in the done chunk so frontend can check for questions
         full_text = "\n".join(assistant_text_parts) if assistant_text_parts else ""
+        _append_workspace_log(
+            workspace_root,
+            "llm_response",
+            {
+                "session_id": session_id,
+                "message_id": assistant_message_id,
+                "content": full_text,
+            },
+        )
         _log.info(f"[Done Chunk] Sending full_text length: {len(full_text)}, starts with {{? {full_text.strip().startswith('{') if full_text else False}")
         _log.info(f"[Done Chunk] First 200 chars: {full_text[:200] if full_text else '(empty)'}")
         done_chunk = ChatChunk(type="done", content=full_text)
@@ -774,6 +870,11 @@ async def stream_agent_response_with_save(
         else:
             error_msg = f"{err_str}\n{traceback.format_exc()}"
         error_chunk = ChatChunk(type="error", content=error_msg)
+        _append_workspace_log(
+            workspace_root,
+            "agent_stream_error",
+            {"session_id": session_id, "error": error_msg},
+        )
         yield f"data: {error_chunk.model_dump_json()}\n\n"
     finally:
         # Always persist assistant message so the agent has memory even if stream errored mid-way
@@ -804,6 +905,11 @@ async def stream_agent_response_with_save(
                 pass
         if _clear_ctx is not None:
             _clear_ctx()
+        _append_workspace_log(
+            workspace_root,
+            "agent_stream_end",
+            {"session_id": session_id, "assistant_message_id": assistant_message_id},
+        )
 
 
 async def stream_agent_response(
@@ -886,6 +992,8 @@ async def root():
         "workspace_root": WORKSPACE_ROOT,
         "model": DEFAULT_MODEL,
         "provider": DEFAULT_PROVIDER,
+        "detailed_logging": DETAILED_LOGGING_ENABLED,
+        "workspace_log_filename": WORKSPACE_LOG_FILENAME,
     }
 
 @app.get("/testping")
@@ -1564,6 +1672,52 @@ if SESSION_AVAILABLE:
             _log = logging.getLogger(__name__)
             _log.error(f"Failed to get token usage: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to get token usage: {str(e)}")
+
+    @app.get("/sessions/{session_id}/workspace/logging", summary="Get workspace logging status")
+    async def get_workspace_logging_status(session_id: str):
+        """Return detailed logging status and file metadata for this session workspace."""
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_root_path = _workspace_path_for_session(session)
+            log_path = _workspace_log_path(str(workspace_root_path))
+            return {
+                "enabled": DETAILED_LOGGING_ENABLED,
+                "file_name": WORKSPACE_LOG_FILENAME,
+                "path": str(log_path),
+                "exists": log_path.exists(),
+                "size_bytes": log_path.stat().st_size if log_path.exists() else 0,
+            }
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/sessions/{session_id}/workspace/logging/content", summary="Get workspace detailed log content")
+    async def get_workspace_logging_content(session_id: str, lines: int = 400):
+        """Read detailed workspace log content (tail by line count)."""
+        try:
+            session_svc = get_session()
+            session = session_svc.get(session_id)
+            workspace_root_path = _workspace_path_for_session(session)
+            log_path = _workspace_log_path(str(workspace_root_path))
+            if not log_path.exists():
+                return {
+                    "enabled": DETAILED_LOGGING_ENABLED,
+                    "path": str(log_path),
+                    "content": "",
+                }
+            safe_lines = max(1, min(lines, 5000))
+            raw_lines = log_path.read_text(encoding="utf-8").splitlines()
+            return {
+                "enabled": DETAILED_LOGGING_ENABLED,
+                "path": str(log_path),
+                "content": "\n".join(raw_lines[-safe_lines:]),
+            }
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
     
     @app.post("/sessions/{session_id}/reset", summary="Reset session context")
     async def reset_session_context(session_id: str):
@@ -1845,6 +1999,16 @@ if SESSION_AVAILABLE:
                 workspace_root = session["directory"]
                 is_init_command = (request.command or "").strip().lower() == "init"
                 message_text = get_init_prompt(workspace_root) if is_init_command else request.message
+                _append_workspace_log(
+                    workspace_root,
+                    "user_message",
+                    {
+                        "session_id": session_id,
+                        "mode": session_mode,
+                        "is_init_command": is_init_command,
+                        "content": message_text,
+                    },
+                )
 
                 # Guardrail: in edit mode, reject large-scope change requests and ask user to switch to plan mode.
                 if not is_init_command and session_mode == "edit":
@@ -2028,6 +2192,15 @@ if SESSION_AVAILABLE:
                     "session_message history: session_id=%s previous=%s langchain=%s roles=%s memories=%s",
                     session_id, len(previous_messages), len(langchain_messages), roles,
                     "yes" if memory_context else "no",
+                )
+                _append_workspace_log(
+                    workspace_root,
+                    "llm_request",
+                    {
+                        "session_id": session_id,
+                        "mode": session_mode,
+                        "messages": _serialize_langchain_messages(langchain_messages),
+                    },
                 )
                 
                 # 7. Create agent and run with full history
@@ -2423,6 +2596,8 @@ async def health():
             "agent_ready": True,
             "workspace_root": WORKSPACE_ROOT,
             "model": DEFAULT_MODEL,
+            "detailed_logging": DETAILED_LOGGING_ENABLED,
+            "workspace_log_filename": WORKSPACE_LOG_FILENAME,
         }
     except Exception as e:
         return {
@@ -2434,6 +2609,15 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     import sys
+    parser = argparse.ArgumentParser(description="OpenScrum server")
+    parser.add_argument("--log", action="store_true", dest="detailed_log", help="Enable detailed workspace JSONL logging")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+    if args.detailed_log:
+        os.environ["OPENSCRUM_DETAILED_LOG"] = "1"
+        DETAILED_LOGGING_ENABLED = True
+
     # Configure logging to see permission flow
     log_level = os.getenv("OPENSCRUM_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
@@ -2452,13 +2636,14 @@ if __name__ == "__main__":
     _log.info("Workspace: %s", WORKSPACE_ROOT)
     _log.info("Provider: %s, Model: %s", DEFAULT_PROVIDER, DEFAULT_MODEL)
     _log.info("Session support: %s, Permission support: %s", SESSION_AVAILABLE, PERMISSION_AVAILABLE)
+    _log.info("Detailed workspace logging: %s", "enabled" if DETAILED_LOGGING_ENABLED else "disabled")
     _log.info("="*60)
     
     # Use one worker so permission replies and the agent stream share the same process
     uvicorn.run(
         app, 
-        host="0.0.0.0", 
-        port=8000, 
+        host=args.host,
+        port=args.port,
         workers=1,
         log_level=log_level.lower(),
         access_log=True

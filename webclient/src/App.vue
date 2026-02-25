@@ -315,6 +315,13 @@
               >
                 Agent Rules
               </button>
+              <button
+                @click="switchToAdditionalTab"
+                class="px-4 py-2 text-sm font-medium transition-colors border-b-2"
+                :class="activeEditTab === 'additional' ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-accent'"
+              >
+                Additional
+              </button>
             </div>
             
             <div class="flex-1 bg-white p-2 pb-1 overflow-hidden">
@@ -328,6 +335,61 @@
                   :content="agentRulesContent"
                   @save="handleSaveAgentRules"
                 />
+                <div v-else-if="activeEditTab === 'additional'" class="h-full bg-white text-black overflow-hidden flex flex-col">
+                  <div class="px-3 py-2 border-b border-surface-dark flex items-center gap-2">
+                    <button
+                      @click="toggleLogOrder"
+                      class="px-2 py-1 text-xs rounded bg-gray-100 hover:bg-gray-200 border border-gray-300 flex-shrink-0"
+                      :title="logOrder === 'new' ? 'Switch to oldest first' : 'Switch to newest first'"
+                    >
+                      {{ logOrder === 'new' ? 'Old first' : 'New first' }}
+                    </button>
+                    <select
+                      v-model="logEventFilter"
+                      class="px-2 py-1 text-xs rounded bg-white border border-gray-300"
+                    >
+                      <option value="all">All events</option>
+                      <option v-for="eventName in availableLogEvents" :key="eventName" :value="eventName">
+                        {{ eventName }}
+                      </option>
+                    </select>
+                    <input
+                      v-model="logKeywordFilter"
+                      type="text"
+                      placeholder="Search logs..."
+                      class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-gray-300"
+                    />
+                    <button
+                      @click="loadWorkspaceLog(true)"
+                      class="px-2 py-1 text-xs rounded bg-gray-100 hover:bg-gray-200 border border-gray-300 flex-shrink-0"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  <div v-if="!detailedLoggingEnabled" class="p-3 text-xs text-gray-700">
+                    Detailed log is disabled. Start backend with <code>--log</code>.
+                  </div>
+                  <div v-else-if="isLoadingWorkspaceLog" class="p-3 text-xs text-gray-700">
+                    Loading workspace log...
+                  </div>
+                  <div v-else class="flex-1 m-0 p-2 text-xs leading-5 overflow-auto bg-gray-50">
+                    <div v-if="displayWorkspaceLogEntries.length === 0" class="p-2 text-gray-600">
+                      No log entries yet.
+                    </div>
+                    <div
+                      v-for="(entry, idx) in displayWorkspaceLogEntries"
+                      :key="`${entry.timestamp_ms || idx}-${entry.event || 'unknown'}-${idx}`"
+                      class="mb-2 rounded border"
+                      :class="eventCardClass(entry.event)"
+                    >
+                      <div class="px-2 py-1 border-b flex items-center justify-between" :class="eventHeaderClass(entry.event)">
+                        <span class="font-semibold">{{ entry.event || 'unknown' }}</span>
+                        <span class="text-[11px]">{{ formatLogTimestamp(entry.timestamp_ms) }}</span>
+                      </div>
+                      <pre class="m-0 p-2 whitespace-pre-wrap break-words">{{ prettyLogEntry(entry) }}</pre>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -459,6 +521,8 @@ const {
   resetSession,
   abortSession,
   getTokenUsage,
+  getWorkspaceLoggingStatus,
+  getWorkspaceLogContent,
   analyzeWorkspace,
   fetchSyncStatus,
   fetchWorkspaceFile,
@@ -470,7 +534,9 @@ const {
   commitGitChanges,
   rejectGitChanges,
   sessionId,
-  modelName 
+  modelName,
+  detailedLoggingEnabled,
+  workspaceLogFilename,
 } = useApiClient()
 
 const mode = ref('plan')
@@ -538,6 +604,106 @@ const consoleOutput = ref('')
 const consoleViewerRef = ref(null)
 const activeEditTab = ref('console')
 const agentRulesContent = ref('')
+const workspaceLogContent = ref('')
+const isLoadingWorkspaceLog = ref(false)
+const logOrder = ref('new') // 'new' | 'old'
+const logEventFilter = ref('all')
+const logKeywordFilter = ref('')
+
+const parsedWorkspaceLogEntries = computed(() => {
+  const raw = workspaceLogContent.value || ''
+  if (!raw.trim()) return []
+  return raw
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line)
+      } catch (e) {
+        return { event: 'raw_line', content: line, timestamp_ms: 0 }
+      }
+    })
+})
+
+const availableLogEvents = computed(() => {
+  const set = new Set()
+  for (const e of parsedWorkspaceLogEntries.value) {
+    if (e?.event) set.add(String(e.event))
+  }
+  return Array.from(set).sort()
+})
+
+const displayWorkspaceLogEntries = computed(() => {
+  let rows = [...parsedWorkspaceLogEntries.value]
+
+  if (logEventFilter.value !== 'all') {
+    rows = rows.filter(e => String(e?.event || '') === logEventFilter.value)
+  }
+
+  const keyword = String(logKeywordFilter.value || '').trim().toLowerCase()
+  if (keyword) {
+    rows = rows.filter((e) => {
+      try {
+        return JSON.stringify(e).toLowerCase().includes(keyword)
+      } catch {
+        return false
+      }
+    })
+  }
+
+  rows.sort((a, b) => {
+    const diff = Number(a?.timestamp_ms || 0) - Number(b?.timestamp_ms || 0)
+    return logOrder.value === 'new' ? -diff : diff
+  })
+  return rows
+})
+
+const toggleLogOrder = () => {
+  logOrder.value = logOrder.value === 'new' ? 'old' : 'new'
+}
+
+const formatLogTimestamp = (ts) => {
+  const n = Number(ts || 0)
+  if (!n) return '-'
+  return new Date(n).toLocaleString()
+}
+
+const eventCardClass = (event) => {
+  const map = {
+    user_message: 'border-blue-300 bg-blue-50',
+    llm_request: 'border-indigo-300 bg-indigo-50',
+    llm_response: 'border-green-300 bg-green-50',
+    tool_call: 'border-amber-300 bg-amber-50',
+    tool_result: 'border-emerald-300 bg-emerald-50',
+    agent_stream_error: 'border-red-300 bg-red-50',
+    agent_stream_start: 'border-slate-300 bg-slate-100',
+    agent_stream_end: 'border-gray-300 bg-gray-100',
+    raw_line: 'border-zinc-300 bg-zinc-50',
+  }
+  return map[event] || 'border-zinc-300 bg-zinc-50'
+}
+
+const eventHeaderClass = (event) => {
+  const map = {
+    user_message: 'bg-blue-100 border-blue-200',
+    llm_request: 'bg-indigo-100 border-indigo-200',
+    llm_response: 'bg-green-100 border-green-200',
+    tool_call: 'bg-amber-100 border-amber-200',
+    tool_result: 'bg-emerald-100 border-emerald-200',
+    agent_stream_error: 'bg-red-100 border-red-200',
+    agent_stream_start: 'bg-slate-200 border-slate-300',
+    agent_stream_end: 'bg-gray-200 border-gray-300',
+    raw_line: 'bg-zinc-100 border-zinc-200',
+  }
+  return map[event] || 'bg-zinc-100 border-zinc-200'
+}
+
+const prettyLogEntry = (entry) => {
+  if (!entry || typeof entry !== 'object') return String(entry || '')
+  const clone = { ...entry }
+  return JSON.stringify(clone, null, 2)
+}
 
 // Computed property to check if any design docs actually exist
 const hasAnyDesignDocs = computed(() => {
@@ -1613,6 +1779,7 @@ const handleResetSession = async () => {
     selectedCodeFile.value = null
     selectedCodeFileContent.value = ''
     consoleOutput.value = ''
+    workspaceLogContent.value = ''
     
     // Clear session state
     clearSessionState()
@@ -2004,6 +2171,28 @@ const fetchAgentRules = async () => {
 const switchToAgentRulesTab = () => {
   activeEditTab.value = 'rules'
   fetchAgentRules()
+}
+
+const loadWorkspaceLog = async (force = false) => {
+  if (!sessionId.value) return
+  if (!detailedLoggingEnabled.value) {
+    workspaceLogContent.value = ''
+    return
+  }
+  if (isLoadingWorkspaceLog.value && !force) return
+  isLoadingWorkspaceLog.value = true
+  try {
+    await getWorkspaceLoggingStatus(sessionId.value)
+    const data = await getWorkspaceLogContent(sessionId.value, 800)
+    workspaceLogContent.value = data.content || ''
+  } finally {
+    isLoadingWorkspaceLog.value = false
+  }
+}
+
+const switchToAdditionalTab = async () => {
+  activeEditTab.value = 'additional'
+  await loadWorkspaceLog(true)
 }
 
 const handleSaveAgentRules = async (content) => {
@@ -2613,6 +2802,7 @@ const handleExitSession = () => {
   toolExecutions.value = []
   selectedTool.value = null
   pendingQuestionData.value = null
+  workspaceLogContent.value = ''
   leftPaneWidth.value = 40 // Reset to default width
   centerPaneWidth.value = 30 // Reset center pane
   showSessionSelector.value = true
@@ -2762,6 +2952,7 @@ const handleCreateSession = async (payload) => {
   selectedTool.value = null
   pendingQuestionData.value = null
   latestProgress.value = null
+  workspaceLogContent.value = ''
   
   // Clear state for new session
   clearSessionState()
@@ -2995,6 +3186,7 @@ onMounted(async () => {
     inputRef.value?.focus()
   }
 })
+
 </script>
 
 <style scoped>
